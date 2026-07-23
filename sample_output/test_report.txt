@@ -1,0 +1,27 @@
+
+Spreadsheet runtime warmup failed during python startup
+Traceback (most recent call last):
+  File "/tmp/tmp.yTcnQsZYiA/artifact_tool_v2-2.8.4/artifact_tool/patches/warm_spreadsheet_runtime_on_startup.py", line 26, in warm_spreadsheet_runtime_on_startup
+  File "/tmp/tmp.yTcnQsZYiA/artifact_tool_v2-2.8.4/artifact_tool/spreadsheet_warmup.py", line 785, in warm_spreadsheet_runtime
+  File "/tmp/tmp.yTcnQsZYiA/artifact_tool_v2-2.8.4/artifact_tool/spreadsheet_warmup.py", line 720, in _warm_feature_flows
+  File "/tmp/tmp.yTcnQsZYiA/artifact_tool_v2-2.8.4/artifact_tool/spreadsheet_warmup.py", line 704, in _warm_collaboration_flows
+  File "/tmp/tmp.yTcnQsZYiA/artifact_tool_v2-2.8.4/artifact_tool/generated/interface/models.py", line 30820, in hydrate_crdt_from_proto
+  File "/tmp/tmp.yTcnQsZYiA/artifact_tool_v2-2.8.4/artifact_tool/rpc/remote.py", line 749, in __call__
+  File "/tmp/tmp.yTcnQsZYiA/artifact_tool_v2-2.8.4/artifact_tool/rpc/client.py", line 150, in call
+artifact_tool.rpc.client.RemoteError: hydrateCrdtFromProto requires an empty collaborative document.
+test_all_codes_can_be_injected (test_generate_dataset.ShiftDatasetGeneratorTests.test_all_codes_can_be_injected) ... ok
+test_case_mutation_preserves_nonletters (test_generate_dataset.ShiftDatasetGeneratorTests.test_case_mutation_preserves_nonletters) ... ok
+test_image_annotation_count_and_surname_metadata (test_generate_dataset.ShiftDatasetGeneratorTests.test_image_annotation_count_and_surname_metadata) ... ok
+test_month_lengths_2026 (test_generate_dataset.ShiftDatasetGeneratorTests.test_month_lengths_2026) ... ok
+test_parse_surname_html (test_generate_dataset.ShiftDatasetGeneratorTests.test_parse_surname_html) ... ok
+test_surname_aggregation (test_generate_dataset.ShiftDatasetGeneratorTests.test_surname_aggregation) ... ok
+test_surname_fallback_is_ranked (test_generate_dataset.ShiftDatasetGeneratorTests.test_surname_fallback_is_ranked) ... ok
+test_unique_full_names_and_code_lengths (test_generate_dataset.ShiftDatasetGeneratorTests.test_unique_full_names_and_code_lengths) ... ok
+test_year_range_dictionary (test_generate_dataset.ShiftDatasetGeneratorTests.test_year_range_dictionary) ... ok
+
+----------------------------------------------------------------------
+Ran 9 tests in 0.075s
+
+OK
+
+returncode=0

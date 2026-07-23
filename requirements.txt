@@ -1,0 +1,4 @@
+Pillow>=10.0
+requests>=2.31
+beautifulsoup4>=4.12
+# artifact_tool is provided in the Codex/ChatGPT artifact environment.

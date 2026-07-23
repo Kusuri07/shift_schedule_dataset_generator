@@ -1,0 +1,26 @@
+{
+  "count": 20,
+  "seed": 20260723,
+  "output_dir": "output",
+  "min_people": 18,
+  "max_people": 32,
+  "min_birth_year": 1966,
+  "max_birth_year": 2007,
+  "female_ratio": 0.88,
+  "case_mutation_probability": 0.45,
+  "ensure_all_codes": true,
+  "scrape_recent_names": false,
+  "recent_name_top_n": 100,
+  "template_ids": [
+    "compact_summary",
+    "clean_grid",
+    "highlighted_grid",
+    "grouped_hospital",
+    "parted_pdf"
+  ],
+  "fixed_months": [],
+  "scrape_surnames": true,
+  "surname_max_rank": 532,
+  "surname_min_population": 5,
+  "surname_weight_power": 0.75
+}
