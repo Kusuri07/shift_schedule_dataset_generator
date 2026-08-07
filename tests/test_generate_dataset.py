@@ -1,3 +1,4 @@
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -28,6 +29,7 @@ class ShiftDatasetGeneratorTests(unittest.TestCase):
         self.assertGreaterEqual(len(entries), 100)
         self.assertTrue(all(entries[i].rank <= entries[i + 1].rank for i in range(len(entries) - 1)))
 
+    @unittest.skipIf(gen.BeautifulSoup is None, 'beautifulsoup4 is not installed')
     def test_parse_surname_html(self):
         html = '''
         <table>
@@ -92,6 +94,109 @@ class ShiftDatasetGeneratorTests(unittest.TestCase):
         self.assertTrue(all(r.surname_population >= 5 for r in schedule.rows))
         self.assertTrue(all(len(r.codes_canonical) == 28 for r in schedule.rows))
         self.assertTrue(all(len(r.codes_display) == 28 for r in schedule.rows))
+
+    def test_page_labels_for_multiple_schedules(self):
+        entries = gen.build_name_dictionary()
+        surname_pool = fallback_surname_pool()
+
+        config = gen.GeneratorConfig(
+            count=3,
+            seed=10,
+            output_dir='unused',
+            min_people=1,
+            max_people=1,
+            fixed_months=[2],
+            ensure_all_codes=False,
+            scrape_surnames=False,
+        )
+        schedule = gen.generate_schedule(
+            2, config, gen.random.Random(10), entries, surname_pool,
+            forced_template='clean_grid'
+        )
+        self.assertEqual(schedule.page_label, '페이지 2/3')
+        self.assertIn('합성 병동 근무표 · 페이지 2/3', schedule.display_title)
+
+        single_config = gen.GeneratorConfig(
+            count=1,
+            show_page_numbers=True,
+            ensure_all_codes=False,
+            scrape_surnames=False,
+        )
+        single = gen.generate_schedule(
+            1, single_config, gen.random.Random(11), entries, surname_pool,
+            forced_template='clean_grid'
+        )
+        self.assertEqual(single.page_label, '')
+        self.assertEqual(single.display_title, single.title)
+
+        hidden_config = gen.GeneratorConfig(
+            count=3,
+            show_page_numbers=False,
+            ensure_all_codes=False,
+            scrape_surnames=False,
+        )
+        hidden = gen.generate_schedule(
+            2, hidden_config, gen.random.Random(12), entries, surname_pool,
+            forced_template='clean_grid'
+        )
+        self.assertEqual(hidden.page_label, '')
+
+    def test_page_metadata_is_written_to_manifest(self):
+        config = gen.GeneratorConfig(
+            count=4,
+            seed=14,
+            min_people=1,
+            max_people=1,
+            fixed_months=[2],
+            ensure_all_codes=False,
+            scrape_surnames=False,
+        )
+        schedule = gen.generate_schedule(
+            3,
+            config,
+            gen.random.Random(14),
+            gen.build_name_dictionary(),
+            fallback_surname_pool(),
+            forced_template='compact_summary',
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            gen.export_annotations([schedule], Path(tmp))
+            manifest = json.loads(
+                (Path(tmp) / 'annotations' / 'manifest.json').read_text(encoding='utf-8')
+            )
+        page = manifest['schedules'][0]
+        self.assertEqual(manifest['dataset_version'], '1.3')
+        self.assertEqual(page['page_number'], 3)
+        self.assertEqual(page['page_count'], 4)
+        self.assertEqual(page['page_label'], '페이지 3/4')
+
+    def test_renderer_payload_can_skip_combined_workbook(self):
+        config = gen.GeneratorConfig(
+            count=2,
+            min_people=1,
+            max_people=1,
+            fixed_months=[2],
+            ensure_all_codes=False,
+            scrape_surnames=False,
+        )
+        names = gen.build_name_dictionary()
+        surnames = gen.build_surname_dictionary(scrape=False)
+        surname_pool = gen.aggregate_surnames(surnames)
+        schedule = gen.generate_schedule(
+            1,
+            config,
+            gen.random.Random(17),
+            names,
+            surname_pool,
+            forced_template='clean_grid',
+        )
+        payload = gen.build_renderer_payload(
+            [schedule], names, surnames, surname_pool, Path('unused'),
+            export_workbook=False,
+        )
+        self.assertEqual(payload['dataset_version'], '1.3')
+        self.assertFalse(payload['export_workbook'])
+        self.assertEqual(payload['schedules'][0]['page_label'], '페이지 1/2')
 
     def test_all_codes_can_be_injected(self):
         config = gen.GeneratorConfig(

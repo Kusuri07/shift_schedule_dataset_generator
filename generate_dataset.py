@@ -290,11 +290,24 @@ class ScheduleRecord:
     rows: list[PersonRow]
     title: str
     sheet_name: str
+    page_number: int = 1
+    page_count: int = 1
+    show_page_number: bool = False
     xlsx_path: str = ''
     clean_image_path: str = ''
     image_width: int = 0
     image_height: int = 0
     cell_annotations: list[dict[str, Any]] = field(default_factory=list)
+
+    @property
+    def page_label(self) -> str:
+        if not self.show_page_number or self.page_count <= 1:
+            return ''
+        return f'페이지 {self.page_number}/{self.page_count}'
+
+    @property
+    def display_title(self) -> str:
+        return f'{self.title} · {self.page_label}' if self.page_label else self.title
 
 
 @dataclass
@@ -315,6 +328,7 @@ class GeneratorConfig:
     surname_max_rank: int = 532
     surname_min_population: int = 5
     surname_weight_power: float = 0.75
+    show_page_numbers: bool = True
     template_ids: list[str] = field(default_factory=lambda: TEMPLATE_IDS.copy())
     fixed_months: list[int] = field(default_factory=list)
 
@@ -777,6 +791,9 @@ def generate_schedule(
         rows=rows,
         title=f'[ {year}. {month}월 ] 합성 병동 근무표',
         sheet_name=schedule_id[:31],
+        page_number=schedule_index,
+        page_count=config.count,
+        show_page_number=config.show_page_numbers,
     )
 
 
@@ -1331,6 +1348,9 @@ def export_annotations(schedules: list[ScheduleRecord], output_dir: Path) -> Non
             rows_jsonl.append({
                 'schedule_id': schedule.schedule_id,
                 'template_id': schedule.template_id,
+                'page_number': schedule.page_number,
+                'page_count': schedule.page_count,
+                'page_label': schedule.page_label,
                 'sheet_name': schedule.sheet_name,
                 'row_id': row.row_id,
                 'row_index': row_index,
@@ -1357,6 +1377,9 @@ def export_annotations(schedules: list[ScheduleRecord], output_dir: Path) -> Non
         for annotation in schedule.cell_annotations:
             row = next(r for r in schedule.rows if r.row_id == annotation['row_id'])
             annotation = dict(annotation)
+            annotation['page_number'] = schedule.page_number
+            annotation['page_count'] = schedule.page_count
+            annotation['page_label'] = schedule.page_label
             annotation['excel_cell'] = f'{excel_column_name(schedule_day_start_col_1based(schedule) + annotation["day"] - 1)}{row.excel_row}'
             annotation['image_path'] = schedule.clean_image_path
             cells_jsonl.append(annotation)
@@ -1379,13 +1402,16 @@ def export_annotations(schedules: list[ScheduleRecord], output_dir: Path) -> Non
     write_csv(output_dir / 'annotations' / 'cells.csv', cell_csv)
 
     manifest = {
-        'dataset_version': '1.2',
+        'dataset_version': '1.3',
         'year': CURRENT_YEAR,
         'schedule_count': len(schedules),
         'all_canonical_codes': ALL_SHIFT_CODES,
         'schedules': [{
             'schedule_id': s.schedule_id,
             'template_id': s.template_id,
+            'page_number': s.page_number,
+            'page_count': s.page_count,
+            'page_label': s.page_label,
             'year': s.year,
             'month': s.month,
             'day_count': s.day_count,
@@ -1483,6 +1509,7 @@ def build_renderer_payload(
     surname_entries: list[SurnameEntry],
     surname_pool: list[SurnameSample],
     output_dir: Path,
+    export_workbook: bool = True,
 ) -> dict[str, Any]:
     sources = [
         {
@@ -1517,13 +1544,17 @@ def build_renderer_payload(
         },
     ]
     return {
-        'dataset_version': '1.2',
+        'dataset_version': '1.3',
         'output_dir': str(output_dir),
+        'export_workbook': export_workbook,
         'shift_code_groups': SHIFT_CODE_GROUPS,
-        'name_entries': [asdict(entry) for entry in name_entries],
-        'surname_entries': [asdict(entry) for entry in surname_entries],
-        'surname_pool': [asdict(entry) for entry in surname_pool],
-        'schedules': [asdict(schedule) for schedule in schedules],
+        'name_entries': [asdict(entry) for entry in name_entries] if export_workbook else [],
+        'surname_entries': [asdict(entry) for entry in surname_entries] if export_workbook else [],
+        'surname_pool': [asdict(entry) for entry in surname_pool] if export_workbook else [],
+        'schedules': [
+            {**asdict(schedule), 'page_label': schedule.page_label}
+            for schedule in schedules
+        ],
         'sources': sources,
     }
 
@@ -1534,8 +1565,10 @@ def render_dataset_workbook(
     surname_entries: list[SurnameEntry],
     surname_pool: list[SurnameSample],
     output_dir: Path,
+    *,
+    export_workbook: bool = True,
 ) -> None:
-    """Create the workbook and render every schedule sheet to a clean 2x PNG."""
+    """Render schedules to PNG and optionally export the combined workbook."""
     node_executable, node_modules = resolve_artifact_tool_runtime()
     renderer_source = Path(__file__).resolve().with_name('render_workbook.mjs')
     if not renderer_source.exists():
@@ -1546,6 +1579,7 @@ def render_dataset_workbook(
         surname_entries,
         surname_pool,
         output_dir,
+        export_workbook=export_workbook,
     )
 
     with tempfile.TemporaryDirectory(prefix='shift-schedule-render-') as temp_name:
@@ -1653,6 +1687,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument('--surname-max-rank', type=int, default=532)
     parser.add_argument('--surname-min-population', type=int, default=5)
     parser.add_argument('--surname-weight-power', type=float, default=0.75)
+    parser.add_argument('--no-page-numbers', action='store_true',
+                        help='Hide visible page numbers even when multiple schedules are generated')
     parser.add_argument('--cycle-templates', action='store_true', help='Cycle through all templates deterministically')
     return parser.parse_args(argv)
 
@@ -1673,7 +1709,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             surname_max_rank=args.surname_max_rank,
             surname_min_population=args.surname_min_population,
             surname_weight_power=args.surname_weight_power,
+            show_page_numbers=not args.no_page_numbers,
         )
+    if args.no_page_numbers:
+        config.show_page_numbers = False
     if config.count < 1:
         raise ValueError('count must be at least 1')
     if config.min_people < 1 or config.max_people < config.min_people:

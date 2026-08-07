@@ -153,14 +153,30 @@ function configureScheduleSheet(sheet, schedule, layout) {
   layout.columnWidths.forEach((width, index) => setColumnWidth(sheet, index, width));
   layout.rowHeights.forEach((height, index) => setRowHeight(sheet, index, height));
 
-  sheet.mergeCells(`A1:${excelColumnName(layout.totalColumns)}1`);
+  const pageBadgeColumns = schedule.page_label ? 2 : 0;
+  const titleColumns = layout.totalColumns - pageBadgeColumns;
+  sheet.mergeCells(`A1:${excelColumnName(titleColumns)}1`);
   sheet.getRange("A1").values = [[schedule.title]];
-  applyStyle(sheet.getRangeByIndexes(0, 0, 1, layout.totalColumns), {
+  applyStyle(sheet.getRangeByIndexes(0, 0, 1, titleColumns), {
     fill: templateTitleFill(schedule.template_id),
     bold: true,
     size: 15,
     borders: { preset: "outside", style: "medium", color: "#222222" },
   });
+  if (pageBadgeColumns) {
+    const badgeStartColumn = titleColumns;
+    sheet.mergeCells(
+      `${excelColumnName(badgeStartColumn + 1)}1:${excelColumnName(layout.totalColumns)}1`,
+    );
+    sheet.getRangeByIndexes(0, badgeStartColumn, 1, 1).values = [[schedule.page_label]];
+    applyStyle(sheet.getRangeByIndexes(0, badgeStartColumn, 1, pageBadgeColumns), {
+      fill: "#FFF7D1",
+      bold: true,
+      color: "#3A2D00",
+      size: 9,
+      borders: { preset: "outside", style: "medium", color: "#725800" },
+    });
+  }
 
   if (layout.noteRow) {
     sheet.mergeCells(`A2:${excelColumnName(layout.totalColumns)}2`);
@@ -454,6 +470,9 @@ function populateGroundTruthSheets(workbook, schedules) {
   const manifestRows = schedules.map((schedule) => [
     schedule.schedule_id,
     schedule.template_id,
+    schedule.page_number,
+    schedule.page_count,
+    schedule.page_label,
     schedule.year,
     schedule.month,
     schedule.day_count,
@@ -463,9 +482,9 @@ function populateGroundTruthSheets(workbook, schedules) {
     schedule.image_width,
     schedule.image_height,
   ]);
-  addTableSheet(workbook, "manifest", ["schedule_id", "template_id", "year", "month", "day_count", "people_count", "sheet_name", "clean_image_path", "image_width", "image_height"], manifestRows, {
+  addTableSheet(workbook, "manifest", ["schedule_id", "template_id", "page_number", "page_count", "page_label", "year", "month", "day_count", "people_count", "sheet_name", "clean_image_path", "image_width", "image_height"], manifestRows, {
     headerFill: "#1F4E78",
-    columnWidths: [140, 150, 80, 80, 90, 110, 140, 320, 110, 110],
+    columnWidths: [140, 150, 100, 100, 140, 80, 80, 90, 110, 140, 320, 110, 110],
   });
 
   const rowRows = [];
@@ -474,7 +493,8 @@ function populateGroundTruthSheets(workbook, schedules) {
     for (let rowIndex = 0; rowIndex < schedule.rows.length; rowIndex += 1) {
       const person = schedule.rows[rowIndex];
       rowRows.push([
-        schedule.schedule_id, schedule.template_id, schedule.sheet_name, person.row_id, rowIndex + 1,
+        schedule.schedule_id, schedule.template_id, schedule.page_number, schedule.page_count,
+        schedule.page_label, schedule.sheet_name, person.row_id, rowIndex + 1,
         person.excel_row, person.group, person.name, person.surname, person.surname_rank,
         person.surname_population, person.surname_hanja_variants, person.surname_source_method,
         person.surname_source_url, person.given_name, person.birth_year, person.gender,
@@ -488,7 +508,8 @@ function populateGroundTruthSheets(workbook, schedules) {
       const column = layout.dayStartColumn + annotation.day;
       const excelCell = `${excelColumnName(column)}${person.excel_row}`;
       cellRows.push([
-        annotation.schedule_id, annotation.template_id, annotation.row_id, annotation.row_index,
+        annotation.schedule_id, annotation.template_id, schedule.page_number, schedule.page_count,
+        schedule.page_label, annotation.row_id, annotation.row_index,
         annotation.name, annotation.surname, annotation.surname_rank, annotation.surname_population,
         annotation.birth_year, annotation.gender, annotation.group, annotation.day, annotation.date,
         annotation.canonical_code, annotation.display_code, excelCell,
@@ -497,13 +518,13 @@ function populateGroundTruthSheets(workbook, schedules) {
     }
   }
 
-  addTableSheet(workbook, "ground_truth_rows", ["schedule_id", "template_id", "sheet_name", "row_id", "row_index", "excel_row", "group", "name", "surname", "surname_rank", "surname_population", "surname_hanja_variants", "surname_source_method", "surname_source_url", "given_name", "birth_year", "gender", "day_count", "codes_canonical_json", "codes_display_json", "codes_canonical_joined", "codes_display_joined", "name_cell"], rowRows, {
+  addTableSheet(workbook, "ground_truth_rows", ["schedule_id", "template_id", "page_number", "page_count", "page_label", "sheet_name", "row_id", "row_index", "excel_row", "group", "name", "surname", "surname_rank", "surname_population", "surname_hanja_variants", "surname_source_method", "surname_source_url", "given_name", "birth_year", "gender", "day_count", "codes_canonical_json", "codes_display_json", "codes_canonical_joined", "codes_display_joined", "name_cell"], rowRows, {
     headerFill: "#C65911",
-    columnWidths: Array(23).fill(150),
+    columnWidths: Array(26).fill(150),
   });
-  addTableSheet(workbook, "ground_truth_cells", ["schedule_id", "template_id", "row_id", "row_index", "name", "surname", "surname_rank", "surname_population", "birth_year", "gender", "group", "day", "date", "canonical_code", "display_code", "excel_cell", "bbox_px_json", "name_bbox_px_json", "image_path"], cellRows, {
+  addTableSheet(workbook, "ground_truth_cells", ["schedule_id", "template_id", "page_number", "page_count", "page_label", "row_id", "row_index", "name", "surname", "surname_rank", "surname_population", "birth_year", "gender", "group", "day", "date", "canonical_code", "display_code", "excel_cell", "bbox_px_json", "name_bbox_px_json", "image_path"], cellRows, {
     headerFill: "#BF9000",
-    columnWidths: Array(19).fill(150),
+    columnWidths: Array(22).fill(150),
   });
 }
 
@@ -512,10 +533,16 @@ async function verifyWorkbook(xlsxPath, outputDir, sheetNames) {
   const input = await FileBlob.load(xlsxPath);
   const workbook = await SpreadsheetFile.importXlsx(input);
   await fs.mkdir(outputDir, { recursive: true });
-  for (const sheetName of sheetNames) {
+  const sheetSpecs = sheetNames.map((spec) => {
+    const separator = spec.indexOf("=");
+    return separator < 0
+      ? { sheetName: spec, range: "A1:H20" }
+      : { sheetName: spec.slice(0, separator), range: spec.slice(separator + 1) };
+  });
+  for (const { sheetName, range } of sheetSpecs) {
     const preview = await workbook.render({
       sheetName,
-      range: "A1:H20",
+      range,
       scale: 1,
       format: "png",
       headers: false,
@@ -525,7 +552,7 @@ async function verifyWorkbook(xlsxPath, outputDir, sheetNames) {
   }
   const keyRange = await workbook.inspect({
     kind: "table",
-    sheetId: "README",
+    sheetId: sheetSpecs[0].sheetName,
     range: "A1:B9",
     include: "values,formulas",
     tableMaxRows: 12,
@@ -547,7 +574,7 @@ async function main() {
   if (process.argv[2] === "--verify") {
     const [, , , xlsxPath, outputDir, ...sheetNames] = process.argv;
     if (!xlsxPath || !outputDir || sheetNames.length === 0) {
-      throw new Error("usage: node render_workbook.mjs --verify <xlsx> <output-dir> <sheet>...");
+      throw new Error("usage: node render_workbook.mjs --verify <xlsx> <output-dir> <sheet[=range]>...");
     }
     await verifyWorkbook(xlsxPath, outputDir, sheetNames);
     return;
@@ -555,11 +582,12 @@ async function main() {
   const [payloadPath, resultPath] = process.argv.slice(2);
   if (!payloadPath || !resultPath) throw new Error("usage: node render_workbook.mjs <payload.json> <result.json>");
   const payload = JSON.parse(await fs.readFile(payloadPath, "utf8"));
+  const exportWorkbook = payload.export_workbook !== false;
   await fs.mkdir(payload.output_dir, { recursive: true });
   await fs.mkdir(path.join(payload.output_dir, "images"), { recursive: true });
 
   const workbook = Workbook.create();
-  populateReferenceSheets(workbook, payload);
+  if (exportWorkbook) populateReferenceSheets(workbook, payload);
 
   for (const schedule of payload.schedules) {
     const layout = scheduleLayout(schedule);
@@ -590,23 +618,31 @@ async function main() {
     );
   }
 
-  populateGroundTruthSheets(workbook, payload.schedules);
+  if (exportWorkbook) populateGroundTruthSheets(workbook, payload.schedules);
   const formulaErrors = await workbook.inspect({
     kind: "match",
     searchTerm: "#REF!|#DIV/0!|#VALUE!|#NAME\\?|#N/A",
     options: { useRegex: true, maxResults: 100 },
     summary: "final formula error scan",
   });
-  const xlsx = await SpreadsheetFile.exportXlsx(workbook);
-  const xlsxPath = path.join(payload.output_dir, "synthetic_shift_dataset.xlsx");
-  await xlsx.save(xlsxPath);
-  await fs.rm(`${xlsxPath}.inspect.ndjson`, { force: true });
+  let xlsxPath = null;
+  if (exportWorkbook) {
+    const xlsx = await SpreadsheetFile.exportXlsx(workbook);
+    xlsxPath = path.join(payload.output_dir, "synthetic_shift_dataset.xlsx");
+    await xlsx.save(xlsxPath);
+    await fs.rm(`${xlsxPath}.inspect.ndjson`, { force: true });
+  }
 
   const result = {
     render_scale: RENDER_SCALE,
+    export_workbook: exportWorkbook,
+    xlsx_path: xlsxPath,
     formula_error_scan: formulaErrors.ndjson,
     schedules: payload.schedules.map((schedule) => ({
       schedule_id: schedule.schedule_id,
+      page_number: schedule.page_number,
+      page_count: schedule.page_count,
+      page_label: schedule.page_label,
       clean_image_path: schedule.clean_image_path,
       image_width: schedule.image_width,
       image_height: schedule.image_height,

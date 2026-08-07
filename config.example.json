@@ -22,5 +22,6 @@
   "scrape_surnames": true,
   "surname_max_rank": 532,
   "surname_min_population": 5,
-  "surname_weight_power": 0.75
+  "surname_weight_power": 0.75,
+  "show_page_numbers": true
 }

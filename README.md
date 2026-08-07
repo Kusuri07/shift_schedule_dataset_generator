@@ -45,6 +45,37 @@ ARTIFACT_TOOL_NODE=<node 실행 파일>
 ARTIFACT_TOOL_NODE_MODULES=<@oai/artifact-tool이 들어 있는 node_modules>
 ```
 
+## 여러 장의 페이지 표시
+
+근무표를 2장 이상 생성하면 각 Excel 시트의 제목과 PNG 우측 가장자리에
+`페이지 1/20` 형식의 번호가 자동으로 표시됩니다. `manifest`에도
+`page_number`, `page_count`, `page_label`이 저장되어 출력물이 섞여도 순서를
+다시 맞출 수 있습니다.
+
+페이지 표시를 끄려면:
+
+```bash
+python generate_dataset.py --count 20 --no-page-numbers
+```
+
+JSON 설정에서는 `"show_page_numbers": false`로 끌 수 있습니다.
+
+## 대량 인쇄 배치와 정답지
+
+인쇄용 묶음은 기본적으로 근무표를 25장씩 나눠 렌더링합니다. 중간 통합 Excel은
+만들지 않으며, PNG와 100페이지 단위 PDF를 생성한 뒤 페이지·행·셀 정답과
+검수용 Excel 인덱스를 함께 저장합니다.
+
+```bash
+python generate_print_batch.py --count 1000 --output-dir outputs/print_batch_1000
+```
+
+생성 폴더에는 `images/`, `pdf/`, `annotations/`, `print_manifest.csv`,
+`print_manifest.json`, `training_answer_index_1000.xlsx`, `PRINT_GUIDE_KO.txt`가
+포함됩니다. 메모리에 맞춰 렌더링 묶음 크기를 바꾸려면
+`--render-chunk-size 10`, PDF 한 권의 페이지 수를 바꾸려면
+`--pages-per-pdf 50`처럼 지정합니다.
+
 ## 테스트
 
 ```bash

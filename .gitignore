@@ -8,3 +8,6 @@ venv/
 output/
 dataset_*/
 node_modules/
+outputs/
+tmp/
+*.inspect.ndjson
