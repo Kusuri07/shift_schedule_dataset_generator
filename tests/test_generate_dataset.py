@@ -114,31 +114,49 @@ class ShiftDatasetGeneratorTests(unittest.TestCase):
         observed = {code for row in schedule.rows for code in row.codes_canonical}
         self.assertTrue(set(gen.ALL_SHIFT_CODES).issubset(observed))
 
-    def test_image_annotation_count_and_surname_metadata(self):
+    def test_rare_korean_leave_codes_have_lower_random_weight(self):
+        rng = gen.random.Random(29)
+        samples = [gen.choose_code_from_group(rng, 'korean') for _ in range(20000)]
+        rare_ratio = sum(code in gen.RARE_KOREAN_CODES for code in samples) / len(samples)
+        uniform_ratio = len(gen.RARE_KOREAN_CODES) / len(gen.SHIFT_CODE_GROUPS['korean'])
+        self.assertLess(rare_ratio, uniform_ratio * 0.6)
+        self.assertGreater(rare_ratio, 0.05)
+
+    def test_excel_render_creates_png_and_bboxes(self):
+        try:
+            gen.resolve_artifact_tool_runtime()
+        except RuntimeError as exc:
+            self.skipTest(str(exc))
         config = gen.GeneratorConfig(
             count=1,
             seed=13,
             output_dir='unused',
-            min_people=5,
-            max_people=5,
+            min_people=3,
+            max_people=3,
             fixed_months=[2],
             ensure_all_codes=False,
             scrape_surnames=False,
-        )
-        entries = gen.build_name_dictionary()
-        rng = gen.random.Random(13)
-        schedule = gen.generate_schedule(
-            1, config, rng, entries, fallback_surname_pool(),
-            forced_template='parted_pdf'
+            template_ids=['parted_pdf'],
         )
         with tempfile.TemporaryDirectory() as tmp:
-            image_path = Path(tmp) / 'test.png'
-            gen.render_schedule_png(schedule, image_path, rng)
+            config.output_dir = tmp
+            schedules, _names, xlsx_path = gen.generate_dataset(config, force_template_cycle=True)
+            schedule = schedules[0]
+            image_path = Path(tmp) / schedule.clean_image_path
+            self.assertTrue(xlsx_path.exists())
             self.assertTrue(image_path.exists())
-            self.assertEqual(len(schedule.cell_annotations), 5 * 28)
+            self.assertEqual(image_path.suffix, '.png')
+            self.assertGreater(schedule.image_width, 2000)
+            self.assertGreater(schedule.image_height, 300)
+            self.assertEqual(len(schedule.cell_annotations), 3 * 28)
             self.assertTrue(all(len(a['bbox_px']) == 4 for a in schedule.cell_annotations))
             self.assertTrue(all(a['surname'] for a in schedule.cell_annotations))
             self.assertTrue(all(a['surname_rank'] >= 1 for a in schedule.cell_annotations))
+            self.assertTrue(all(
+                0 <= a['bbox_px'][0] < a['bbox_px'][2] <= schedule.image_width
+                and 0 <= a['bbox_px'][1] < a['bbox_px'][3] <= schedule.image_height
+                for a in schedule.cell_annotations
+            ))
 
 
 if __name__ == '__main__':

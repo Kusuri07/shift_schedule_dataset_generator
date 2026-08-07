@@ -1,0 +1,625 @@
+import fs from "node:fs/promises";
+import path from "node:path";
+
+import { FileBlob, SpreadsheetFile, Workbook } from "@oai/artifact-tool";
+
+
+const RENDER_SCALE = 2;
+const DAY_COLUMN_WIDTH_PX = 48;
+const BODY_ROW_HEIGHT_PX = 28;
+const THIN_GRID = { preset: "all", style: "thin", color: "#9A9A9A" };
+const GROUP_TEMPLATES = new Set(["compact_summary", "grouped_hospital", "parted_pdf"]);
+
+
+function excelColumnName(index1Based) {
+  let result = "";
+  let value = index1Based;
+  while (value > 0) {
+    value -= 1;
+    result = String.fromCharCode(65 + (value % 26)) + result;
+    value = Math.floor(value / 26);
+  }
+  return result;
+}
+
+
+function pngDimensions(bytes) {
+  if (bytes.length < 24 || bytes[0] !== 0x89 || bytes[1] !== 0x50) {
+    throw new Error("artifact-tool did not return a PNG image");
+  }
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  return { width: view.getUint32(16), height: view.getUint32(20) };
+}
+
+
+function applyStyle(range, options = {}) {
+  range.format = {
+    fill: options.fill ?? "#FFFFFF",
+    font: {
+      name: "Malgun Gothic",
+      size: options.size ?? 10,
+      bold: options.bold ?? false,
+      color: options.color ?? "#111111",
+    },
+    horizontalAlignment: options.horizontalAlignment ?? "center",
+    verticalAlignment: "center",
+    wrapText: options.wrapText ?? false,
+    borders: options.borders ?? THIN_GRID,
+  };
+}
+
+
+function setColumnWidth(sheet, columnIndex, widthPx) {
+  sheet.getRangeByIndexes(0, columnIndex, 1, 1).format.columnWidthPx = widthPx;
+}
+
+
+function setRowHeight(sheet, rowIndex, heightPx) {
+  sheet.getRangeByIndexes(rowIndex, 0, 1, 1).format.rowHeightPx = heightPx;
+}
+
+
+function summaryLabels(templateId) {
+  if (templateId === "compact_summary") return ["D", "E", "N", "OFF", "연차"];
+  if (templateId === "grouped_hospital") return ["D", "E", "N", "OFF"];
+  return [];
+}
+
+
+function templateTitleFill(templateId) {
+  if (templateId === "parted_pdf") return "#D9EAD3";
+  if (templateId === "clean_grid") return "#D9EAF7";
+  if (templateId === "highlighted_grid") return "#FFF2CC";
+  return "#F8B800";
+}
+
+
+function groupFill(group) {
+  const palette = ["#F6E5B9", "#EBCFDB", "#CDE2F2", "#E7E7E7"];
+  const match = String(group).match(/\d+/);
+  const index = Math.max(0, Number(match?.[0] ?? 1) - 1);
+  return palette[index % palette.length];
+}
+
+
+function compactCodeFill(code) {
+  const normalized = String(code).toUpperCase();
+  if (normalized === "D") return "#DCEBD7";
+  if (normalized === "E") return "#F6E0D7";
+  if (normalized === "N") return "#DDE5F6";
+  if (["OFF", "O", "F", "OF"].includes(normalized)) return "#F7DDE3";
+  return "#FFFFFF";
+}
+
+
+function highlightedCodeFill(scheduleId, rowIndex, dayIndex, canonicalCode) {
+  const common = new Set(["D", "E", "N", "F", "M", "OFF", "O"]);
+  if (common.has(String(canonicalCode).toUpperCase())) return rowIndex % 2 === 0 ? "#FFFFFF" : "#F9FAFA";
+  const palette = ["#FFB7DB", "#EAF39A", "#A9DFF0"];
+  const key = `${scheduleId}:${rowIndex}:${dayIndex}:${canonicalCode}`;
+  let hash = 0;
+  for (const char of key) hash = (hash * 31 + char.codePointAt(0)) >>> 0;
+  return palette[hash % palette.length];
+}
+
+
+function codeFontSize(code) {
+  const length = [...String(code)].length;
+  if (length <= 2) return 10;
+  if (length <= 4) return 8;
+  return 7;
+}
+
+
+function scheduleLayout(schedule) {
+  const groupColumn = GROUP_TEMPLATES.has(schedule.template_id);
+  const noteRow = new Set(["grouped_hospital", "parted_pdf"]).has(schedule.template_id);
+  const dayStartColumn = groupColumn ? 2 : 1;
+  const summaries = summaryLabels(schedule.template_id);
+  const headerStartRow = noteRow ? 2 : 1;
+  const bodyStartRow = headerStartRow + 2;
+  const totalColumns = dayStartColumn + schedule.day_count + summaries.length;
+  const totalRows = bodyStartRow + schedule.rows.length;
+
+  const columnWidths = [];
+  if (groupColumn) columnWidths.push(schedule.template_id === "compact_summary" ? 64 : 92);
+  columnWidths.push(112);
+  for (let day = 0; day < schedule.day_count; day += 1) columnWidths.push(DAY_COLUMN_WIDTH_PX);
+  for (let index = 0; index < summaries.length; index += 1) columnWidths.push(54);
+
+  const rowHeights = [38];
+  if (noteRow) rowHeights.push(28);
+  rowHeights.push(27, 27);
+  for (let index = 0; index < schedule.rows.length; index += 1) rowHeights.push(BODY_ROW_HEIGHT_PX);
+
+  return {
+    groupColumn,
+    noteRow,
+    dayStartColumn,
+    summaries,
+    headerStartRow,
+    bodyStartRow,
+    totalColumns,
+    totalRows,
+    columnWidths,
+    rowHeights,
+    usedRange: `A1:${excelColumnName(totalColumns)}${totalRows}`,
+  };
+}
+
+
+function configureScheduleSheet(sheet, schedule, layout) {
+  sheet.showGridLines = false;
+  layout.columnWidths.forEach((width, index) => setColumnWidth(sheet, index, width));
+  layout.rowHeights.forEach((height, index) => setRowHeight(sheet, index, height));
+
+  sheet.mergeCells(`A1:${excelColumnName(layout.totalColumns)}1`);
+  sheet.getRange("A1").values = [[schedule.title]];
+  applyStyle(sheet.getRangeByIndexes(0, 0, 1, layout.totalColumns), {
+    fill: templateTitleFill(schedule.template_id),
+    bold: true,
+    size: 15,
+    borders: { preset: "outside", style: "medium", color: "#222222" },
+  });
+
+  if (layout.noteRow) {
+    sheet.mergeCells(`A2:${excelColumnName(layout.totalColumns)}2`);
+    sheet.getRange("A2").values = [["공지사항: 합성 데이터 / 실제 직원 정보 아님 / 모든 코드는 학습용 무작위 생성"]];
+    applyStyle(sheet.getRangeByIndexes(1, 0, 1, layout.totalColumns), {
+      fill: "#FFFFFF",
+      size: 9,
+      horizontalAlignment: "left",
+      borders: { preset: "outside", style: "thin", color: "#777777" },
+    });
+  }
+
+  const headerRow = layout.headerStartRow;
+  if (layout.groupColumn) {
+    sheet.mergeCells(`A${headerRow + 1}:A${headerRow + 2}`);
+    sheet.getRangeByIndexes(headerRow, 0, 1, 1).values = [[schedule.template_id === "compact_summary" ? "병동" : "구분"]];
+    sheet.mergeCells(`B${headerRow + 1}:B${headerRow + 2}`);
+    sheet.getRangeByIndexes(headerRow, 1, 1, 1).values = [["성명"]];
+  } else {
+    sheet.mergeCells(`A${headerRow + 1}:A${headerRow + 2}`);
+    sheet.getRangeByIndexes(headerRow, 0, 1, 1).values = [["성명"]];
+  }
+
+  applyStyle(sheet.getRangeByIndexes(headerRow, 0, 2, layout.totalColumns), {
+    fill: "#F1F4F5",
+    bold: true,
+    size: 10,
+  });
+
+  for (let dayIndex = 0; dayIndex < schedule.day_count; dayIndex += 1) {
+    const column = layout.dayStartColumn + dayIndex;
+    const weekday = schedule.weekdays[dayIndex];
+    const weekendFill = weekday === "일" ? "#FCE8E6" : weekday === "토" ? "#E8F0FE" : "#F6F8F8";
+    sheet.getRangeByIndexes(headerRow, column, 1, 1).values = [[dayIndex + 1]];
+    sheet.getRangeByIndexes(headerRow + 1, column, 1, 1).values = [[weekday]];
+    applyStyle(sheet.getRangeByIndexes(headerRow, column, 2, 1), {
+      fill: weekendFill,
+      bold: true,
+      color: weekday === "일" ? "#C5221F" : weekday === "토" ? "#185ABC" : "#222222",
+      size: 9,
+    });
+  }
+
+  const summaryStartColumn = layout.dayStartColumn + schedule.day_count;
+  layout.summaries.forEach((label, index) => {
+    const column = summaryStartColumn + index;
+    sheet.mergeCells(`${excelColumnName(column + 1)}${headerRow + 1}:${excelColumnName(column + 1)}${headerRow + 2}`);
+    sheet.getRangeByIndexes(headerRow, column, 1, 1).values = [[label]];
+    applyStyle(sheet.getRangeByIndexes(headerRow, column, 2, 1), { fill: "#FAFAFA", bold: true, size: 9 });
+  });
+
+  for (let rowIndex = 0; rowIndex < schedule.rows.length; rowIndex += 1) {
+    const person = schedule.rows[rowIndex];
+    const row = layout.bodyStartRow + rowIndex;
+    const alternatingFill = rowIndex % 2 === 0 ? "#FFFFFF" : "#F8FAFA";
+    applyStyle(sheet.getRangeByIndexes(row, 0, 1, layout.totalColumns), { fill: alternatingFill, size: 9 });
+
+    if (layout.groupColumn) {
+      sheet.getRangeByIndexes(row, 0, 1, 1).values = [[person.group]];
+      sheet.getRangeByIndexes(row, 1, 1, 1).values = [[person.name]];
+      applyStyle(sheet.getRangeByIndexes(row, 0, 1, 1), { fill: groupFill(person.group), bold: true, size: 10 });
+      applyStyle(sheet.getRangeByIndexes(row, 1, 1, 1), {
+        fill: schedule.template_id === "parted_pdf" ? groupFill(person.group) : alternatingFill,
+        size: 10,
+      });
+    } else {
+      sheet.getRangeByIndexes(row, 0, 1, 1).values = [[person.name]];
+      applyStyle(sheet.getRangeByIndexes(row, 0, 1, 1), { fill: alternatingFill, size: 10 });
+    }
+
+    for (let dayIndex = 0; dayIndex < schedule.day_count; dayIndex += 1) {
+      const column = layout.dayStartColumn + dayIndex;
+      const displayCode = person.codes_display[dayIndex];
+      const canonicalCode = person.codes_canonical[dayIndex];
+      let fill = alternatingFill;
+      if (schedule.template_id === "compact_summary") fill = compactCodeFill(canonicalCode);
+      if (schedule.template_id === "highlighted_grid") {
+        fill = highlightedCodeFill(schedule.schedule_id, rowIndex, dayIndex, canonicalCode);
+      }
+      const cell = sheet.getRangeByIndexes(row, column, 1, 1);
+      cell.values = [[displayCode]];
+      applyStyle(cell, { fill, size: codeFontSize(displayCode), wrapText: false });
+    }
+
+    if (layout.summaries.length > 0) {
+      const firstDay = excelColumnName(layout.dayStartColumn + 1);
+      const lastDay = excelColumnName(layout.dayStartColumn + schedule.day_count);
+      const excelRow = row + 1;
+      const dayRange = `${firstDay}${excelRow}:${lastDay}${excelRow}`;
+      const formulas = {
+        D: `=COUNTIF(${dayRange},"D")`,
+        E: `=COUNTIF(${dayRange},"E")`,
+        N: `=COUNTIF(${dayRange},"N")`,
+        OFF: `=COUNTIF(${dayRange},"OFF")+COUNTIF(${dayRange},"O")+COUNTIF(${dayRange},"F")+COUNTIF(${dayRange},"OF")`,
+        연차: `=COUNTIF(${dayRange},"연차")+COUNTIF(${dayRange},"연가")+COUNTIF(${dayRange},"AL")+COUNTIF(${dayRange},"A/L")`,
+      };
+      layout.summaries.forEach((label, index) => {
+        const cell = sheet.getRangeByIndexes(row, summaryStartColumn + index, 1, 1);
+        cell.formulas = [[formulas[label]]];
+        applyStyle(cell, { fill: "#FFFFFF", size: 9 });
+      });
+    }
+  }
+
+  if (new Set(["grouped_hospital", "parted_pdf"]).has(schedule.template_id)) {
+    let start = 0;
+    while (start < schedule.rows.length) {
+      let end = start;
+      while (end + 1 < schedule.rows.length && schedule.rows[end + 1].group === schedule.rows[start].group) end += 1;
+      if (end > start) {
+        const firstRow = layout.bodyStartRow + start + 1;
+        const lastRow = layout.bodyStartRow + end + 1;
+        sheet.mergeCells(`A${firstRow}:A${lastRow}`);
+        sheet.getRange(`A${firstRow}`).values = [[schedule.rows[start].group]];
+        applyStyle(sheet.getRange(`A${firstRow}:A${lastRow}`), {
+          fill: groupFill(schedule.rows[start].group),
+          bold: true,
+          size: 11,
+          borders: { preset: "outside", style: "medium", color: "#333333" },
+        });
+      }
+      start = end + 1;
+    }
+  }
+
+  sheet.freezePanes.freezeRows(layout.bodyStartRow);
+  sheet.freezePanes.freezeColumns(layout.dayStartColumn);
+}
+
+
+function validateScheduleCellValues(sheet, schedule, layout) {
+  for (let rowIndex = 0; rowIndex < schedule.rows.length; rowIndex += 1) {
+    const person = schedule.rows[rowIndex];
+    const row = layout.bodyStartRow + rowIndex;
+    for (let dayIndex = 0; dayIndex < schedule.day_count; dayIndex += 1) {
+      const column = layout.dayStartColumn + dayIndex;
+      const actual = sheet.getRangeByIndexes(row, column, 1, 1).values[0][0];
+      const expected = person.codes_display[dayIndex];
+      if (actual !== expected) {
+        throw new Error(
+          `${schedule.schedule_id} code mismatch at row ${rowIndex + 1}, day ${dayIndex + 1}: ${actual} != ${expected}`,
+        );
+      }
+    }
+  }
+}
+
+
+function makeCellAnnotations(schedule, layout, imageWidth, imageHeight) {
+  const totalWidth = layout.columnWidths.reduce((sum, value) => sum + value, 0);
+  const totalHeight = layout.rowHeights.reduce((sum, value) => sum + value, 0);
+  const xScale = imageWidth / totalWidth;
+  const yScale = imageHeight / totalHeight;
+  const xEdges = [0];
+  const yEdges = [0];
+  for (const width of layout.columnWidths) xEdges.push(xEdges.at(-1) + width);
+  for (const height of layout.rowHeights) yEdges.push(yEdges.at(-1) + height);
+  const annotations = [];
+
+  schedule.rows.forEach((person, rowIndex) => {
+    const sheetRowIndex = layout.bodyStartRow + rowIndex;
+    const excelRow = sheetRowIndex + 1;
+    const nameColumn = layout.groupColumn ? 1 : 0;
+    person.excel_row = excelRow;
+    person.name_cell = `${excelColumnName(nameColumn + 1)}${excelRow}`;
+    const nameBox = [
+      Math.round(xEdges[nameColumn] * xScale),
+      Math.round(yEdges[sheetRowIndex] * yScale),
+      Math.round(xEdges[nameColumn + 1] * xScale),
+      Math.round(yEdges[sheetRowIndex + 1] * yScale),
+    ];
+    person.codes_display.forEach((displayCode, dayIndex) => {
+      const column = layout.dayStartColumn + dayIndex;
+      annotations.push({
+        schedule_id: schedule.schedule_id,
+        template_id: schedule.template_id,
+        row_id: person.row_id,
+        row_index: rowIndex + 1,
+        name: person.name,
+        surname: person.surname,
+        surname_rank: person.surname_rank,
+        surname_population: person.surname_population,
+        surname_hanja_variants: person.surname_hanja_variants,
+        birth_year: person.birth_year,
+        gender: person.gender,
+        group: person.group,
+        day: dayIndex + 1,
+        date: `${String(schedule.year).padStart(4, "0")}-${String(schedule.month).padStart(2, "0")}-${String(dayIndex + 1).padStart(2, "0")}`,
+        canonical_code: person.codes_canonical[dayIndex],
+        display_code: displayCode,
+        bbox_px: [
+          Math.round(xEdges[column] * xScale),
+          Math.round(yEdges[sheetRowIndex] * yScale),
+          Math.round(xEdges[column + 1] * xScale),
+          Math.round(yEdges[sheetRowIndex + 1] * yScale),
+        ],
+        name_bbox_px: nameBox,
+      });
+    });
+  });
+  return annotations;
+}
+
+
+function addTableSheet(workbook, name, headers, rows, options = {}) {
+  const sheet = workbook.worksheets.add(name);
+  sheet.showGridLines = false;
+  sheet.getRangeByIndexes(0, 0, 1, headers.length).values = [headers];
+  if (rows.length > 0) sheet.getRangeByIndexes(1, 0, rows.length, headers.length).values = rows;
+  applyStyle(sheet.getRangeByIndexes(0, 0, 1, headers.length), {
+    fill: options.headerFill ?? "#1F4E78",
+    bold: true,
+    color: "#FFFFFF",
+    size: 10,
+  });
+  if (rows.length > 0) {
+    applyStyle(sheet.getRangeByIndexes(1, 0, rows.length, headers.length), {
+      fill: "#FFFFFF",
+      size: 9,
+      horizontalAlignment: options.bodyAlignment ?? "left",
+    });
+  }
+  sheet.freezePanes.freezeRows(1);
+  headers.forEach((_header, index) => setColumnWidth(sheet, index, options.columnWidths?.[index] ?? 140));
+  return sheet;
+}
+
+
+function populateReferenceSheets(workbook, payload) {
+  const readme = workbook.worksheets.add("README");
+  readme.showGridLines = false;
+  readme.mergeCells("A1:H1");
+  readme.getRange("A1").values = [["합성 간호사 근무표 데이터셋"]];
+  applyStyle(readme.getRange("A1:H1"), { fill: "#1F4E78", bold: true, color: "#FFFFFF", size: 16 });
+  const notes = [
+    ["항목", "내용"],
+    ["목적", "근무표 OCR 및 표 구조 인식 학습용 합성 데이터"],
+    ["개인정보", "실제 직원 정보가 아닌 합성 이름과 무작위 근무 코드"],
+    ["PNG 생성", "각 근무표 시트의 전체 사용 범위를 2배 해상도로 직접 렌더링"],
+    ["엑셀", "통합 문서를 항상 보관하며 근무표·사전·정답지·출처 시트를 포함"],
+    ["정답지", "ground_truth_rows 및 ground_truth_cells 시트"],
+    ["이미지 좌표", "bbox_px는 최종 PNG 기준 [x1,y1,x2,y2]"],
+  ];
+  readme.getRangeByIndexes(2, 0, notes.length, 2).values = notes;
+  applyStyle(readme.getRangeByIndexes(2, 0, 1, 2), { fill: "#D9EAF7", bold: true });
+  applyStyle(readme.getRangeByIndexes(3, 0, notes.length - 1, 2), { fill: "#FFFFFF", horizontalAlignment: "left", wrapText: true });
+  setColumnWidth(readme, 0, 150);
+  setColumnWidth(readme, 1, 620);
+
+  const codeRows = [];
+  for (const [group, codes] of Object.entries(payload.shift_code_groups)) {
+    for (const code of codes) codeRows.push([group, code, /[A-Za-z]/.test(code)]);
+  }
+  addTableSheet(workbook, "code_dictionary", ["group", "canonical_code", "english_case_mutable"], codeRows, {
+    headerFill: "#385723",
+    columnWidths: [130, 170, 180],
+    bodyAlignment: "center",
+  });
+
+  addTableSheet(
+    workbook,
+    "names_by_birth_year",
+    ["birth_year", "gender", "rank", "given_name", "source_year", "source_method", "source_url"],
+    payload.name_entries.map((entry) => [entry.birth_year, entry.gender, entry.rank, entry.given_name, entry.source_year, entry.source_method, entry.source_url]),
+    { headerFill: "#8064A2", columnWidths: [100, 90, 80, 110, 100, 190, 420] },
+  );
+
+  const surnameByText = Object.fromEntries(payload.surname_pool.map((item) => [item.surname, item]));
+  addTableSheet(
+    workbook,
+    "surname_dictionary",
+    ["rank", "surname", "hanja", "population", "source_year", "source_method", "source_url", "aggregated_population", "aggregated_best_rank", "hanja_variants", "sampling_weight_power_0_75"],
+    payload.surname_entries.map((entry) => {
+      const aggregate = surnameByText[entry.surname];
+      return [entry.rank, entry.surname, entry.hanja, entry.population, entry.source_year, entry.source_method, entry.source_url, aggregate.population, aggregate.best_rank, aggregate.hanja_variants, Number((aggregate.population ** 0.75).toFixed(6))];
+    }),
+    { headerFill: "#7F6000", columnWidths: [70, 80, 90, 120, 100, 190, 420, 160, 150, 170, 190] },
+  );
+
+  addTableSheet(
+    workbook,
+    "sources",
+    ["source_id", "purpose", "url_or_reference", "note"],
+    payload.sources.map((source) => [source.source_id, source.purpose, source.url_or_reference, source.note]),
+    { headerFill: "#5B9BD5", columnWidths: [150, 260, 460, 420] },
+  );
+}
+
+
+function populateGroundTruthSheets(workbook, schedules) {
+  const manifestRows = schedules.map((schedule) => [
+    schedule.schedule_id,
+    schedule.template_id,
+    schedule.year,
+    schedule.month,
+    schedule.day_count,
+    schedule.rows.length,
+    schedule.sheet_name,
+    schedule.clean_image_path,
+    schedule.image_width,
+    schedule.image_height,
+  ]);
+  addTableSheet(workbook, "manifest", ["schedule_id", "template_id", "year", "month", "day_count", "people_count", "sheet_name", "clean_image_path", "image_width", "image_height"], manifestRows, {
+    headerFill: "#1F4E78",
+    columnWidths: [140, 150, 80, 80, 90, 110, 140, 320, 110, 110],
+  });
+
+  const rowRows = [];
+  const cellRows = [];
+  for (const schedule of schedules) {
+    for (let rowIndex = 0; rowIndex < schedule.rows.length; rowIndex += 1) {
+      const person = schedule.rows[rowIndex];
+      rowRows.push([
+        schedule.schedule_id, schedule.template_id, schedule.sheet_name, person.row_id, rowIndex + 1,
+        person.excel_row, person.group, person.name, person.surname, person.surname_rank,
+        person.surname_population, person.surname_hanja_variants, person.surname_source_method,
+        person.surname_source_url, person.given_name, person.birth_year, person.gender,
+        schedule.day_count, JSON.stringify(person.codes_canonical), JSON.stringify(person.codes_display),
+        person.codes_canonical.join("|"), person.codes_display.join("|"), person.name_cell,
+      ]);
+    }
+    for (const annotation of schedule.cell_annotations) {
+      const person = schedule.rows.find((row) => row.row_id === annotation.row_id);
+      const layout = schedule._layout;
+      const column = layout.dayStartColumn + annotation.day;
+      const excelCell = `${excelColumnName(column)}${person.excel_row}`;
+      cellRows.push([
+        annotation.schedule_id, annotation.template_id, annotation.row_id, annotation.row_index,
+        annotation.name, annotation.surname, annotation.surname_rank, annotation.surname_population,
+        annotation.birth_year, annotation.gender, annotation.group, annotation.day, annotation.date,
+        annotation.canonical_code, annotation.display_code, excelCell,
+        JSON.stringify(annotation.bbox_px), JSON.stringify(annotation.name_bbox_px), schedule.clean_image_path,
+      ]);
+    }
+  }
+
+  addTableSheet(workbook, "ground_truth_rows", ["schedule_id", "template_id", "sheet_name", "row_id", "row_index", "excel_row", "group", "name", "surname", "surname_rank", "surname_population", "surname_hanja_variants", "surname_source_method", "surname_source_url", "given_name", "birth_year", "gender", "day_count", "codes_canonical_json", "codes_display_json", "codes_canonical_joined", "codes_display_joined", "name_cell"], rowRows, {
+    headerFill: "#C65911",
+    columnWidths: Array(23).fill(150),
+  });
+  addTableSheet(workbook, "ground_truth_cells", ["schedule_id", "template_id", "row_id", "row_index", "name", "surname", "surname_rank", "surname_population", "birth_year", "gender", "group", "day", "date", "canonical_code", "display_code", "excel_cell", "bbox_px_json", "name_bbox_px_json", "image_path"], cellRows, {
+    headerFill: "#BF9000",
+    columnWidths: Array(19).fill(150),
+  });
+}
+
+
+async function verifyWorkbook(xlsxPath, outputDir, sheetNames) {
+  const input = await FileBlob.load(xlsxPath);
+  const workbook = await SpreadsheetFile.importXlsx(input);
+  await fs.mkdir(outputDir, { recursive: true });
+  for (const sheetName of sheetNames) {
+    const preview = await workbook.render({
+      sheetName,
+      range: "A1:H20",
+      scale: 1,
+      format: "png",
+      headers: false,
+    });
+    const bytes = new Uint8Array(await preview.arrayBuffer());
+    await fs.writeFile(path.join(outputDir, `${sheetName}.png`), bytes);
+  }
+  const keyRange = await workbook.inspect({
+    kind: "table",
+    sheetId: "README",
+    range: "A1:B9",
+    include: "values,formulas",
+    tableMaxRows: 12,
+    tableMaxCols: 4,
+    maxChars: 3000,
+  });
+  const errors = await workbook.inspect({
+    kind: "match",
+    searchTerm: "#REF!|#DIV/0!|#VALUE!|#NAME\\?|#N/A",
+    options: { useRegex: true, maxResults: 100 },
+    summary: "verification formula error scan",
+  });
+  console.log(keyRange.ndjson);
+  console.log(errors.ndjson);
+}
+
+
+async function main() {
+  if (process.argv[2] === "--verify") {
+    const [, , , xlsxPath, outputDir, ...sheetNames] = process.argv;
+    if (!xlsxPath || !outputDir || sheetNames.length === 0) {
+      throw new Error("usage: node render_workbook.mjs --verify <xlsx> <output-dir> <sheet>...");
+    }
+    await verifyWorkbook(xlsxPath, outputDir, sheetNames);
+    return;
+  }
+  const [payloadPath, resultPath] = process.argv.slice(2);
+  if (!payloadPath || !resultPath) throw new Error("usage: node render_workbook.mjs <payload.json> <result.json>");
+  const payload = JSON.parse(await fs.readFile(payloadPath, "utf8"));
+  await fs.mkdir(payload.output_dir, { recursive: true });
+  await fs.mkdir(path.join(payload.output_dir, "images"), { recursive: true });
+
+  const workbook = Workbook.create();
+  populateReferenceSheets(workbook, payload);
+
+  for (const schedule of payload.schedules) {
+    const layout = scheduleLayout(schedule);
+    schedule._layout = layout;
+    const sheet = workbook.worksheets.add(schedule.sheet_name);
+    configureScheduleSheet(sheet, schedule, layout);
+    validateScheduleCellValues(sheet, schedule, layout);
+    const imageBlob = await workbook.render({
+      sheetName: schedule.sheet_name,
+      range: layout.usedRange,
+      scale: RENDER_SCALE,
+      format: "png",
+      headers: false,
+    });
+    const imageBytes = new Uint8Array(await imageBlob.arrayBuffer());
+    const dimensions = pngDimensions(imageBytes);
+    const imageName = `${schedule.schedule_id}_${schedule.template_id}.png`;
+    const imagePath = path.join(payload.output_dir, "images", imageName);
+    await fs.writeFile(imagePath, imageBytes);
+    schedule.clean_image_path = path.posix.join("images", imageName);
+    schedule.image_width = dimensions.width;
+    schedule.image_height = dimensions.height;
+    schedule.cell_annotations = makeCellAnnotations(
+      schedule,
+      layout,
+      dimensions.width,
+      dimensions.height,
+    );
+  }
+
+  populateGroundTruthSheets(workbook, payload.schedules);
+  const formulaErrors = await workbook.inspect({
+    kind: "match",
+    searchTerm: "#REF!|#DIV/0!|#VALUE!|#NAME\\?|#N/A",
+    options: { useRegex: true, maxResults: 100 },
+    summary: "final formula error scan",
+  });
+  const xlsx = await SpreadsheetFile.exportXlsx(workbook);
+  const xlsxPath = path.join(payload.output_dir, "synthetic_shift_dataset.xlsx");
+  await xlsx.save(xlsxPath);
+  await fs.rm(`${xlsxPath}.inspect.ndjson`, { force: true });
+
+  const result = {
+    render_scale: RENDER_SCALE,
+    formula_error_scan: formulaErrors.ndjson,
+    schedules: payload.schedules.map((schedule) => ({
+      schedule_id: schedule.schedule_id,
+      clean_image_path: schedule.clean_image_path,
+      image_width: schedule.image_width,
+      image_height: schedule.image_height,
+      rows: schedule.rows.map((person) => ({
+        row_id: person.row_id,
+        excel_row: person.excel_row,
+        name_cell: person.name_cell,
+      })),
+      cell_annotations: schedule.cell_annotations,
+    })),
+  };
+  await fs.writeFile(resultPath, JSON.stringify(result), "utf8");
+}
+
+
+await main();

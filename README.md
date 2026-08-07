@@ -22,7 +22,9 @@ output/
     └── cells.csv
 ```
 
-Excel 통합 문서에는 `README`, 코드·이름·성씨 사전, manifest, 행·셀 정답지, 생성된 근무표별 시트와 출처 시트가 포함됩니다.
+Excel 통합 문서에는 `README`, 코드·이름·성씨 사전, manifest, 행·셀 정답지, 생성된 근무표별 시트와 출처 시트가 포함됩니다. 통합 문서는 항상 보관됩니다.
+
+각 PNG는 별도 그림 코드로 다시 그리지 않습니다. 완성된 Excel 근무표 시트의 제목부터 마지막 근무 행·집계 열까지를 `2x` 해상도로 직접 렌더링하므로 Excel과 동일한 글꼴, 중앙 정렬, 병합 셀, 색상을 유지합니다. Excel의 열 문자와 행 번호는 PNG에 포함되지 않습니다.
 
 ## 실행
 
@@ -34,6 +36,13 @@ python generate_dataset.py --count 20 --output-dir output --seed 20260723 --cycl
 
 ```bash
 python generate_dataset.py --config config.example.json --cycle-templates
+```
+
+Excel/PNG 렌더링에는 Node.js와 Codex/ChatGPT 환경의 `@oai/artifact-tool`이 필요합니다. 비표준 런타임에서는 다음 환경 변수로 번들 경로를 지정할 수 있습니다.
+
+```text
+ARTIFACT_TOOL_NODE=<node 실행 파일>
+ARTIFACT_TOOL_NODE_MODULES=<@oai/artifact-tool이 들어 있는 node_modules>
 ```
 
 ## 테스트
@@ -104,6 +113,8 @@ python generate_dataset.py \
 - 요청된 전체 정규 코드를 `code_dictionary`에 저장합니다.
 - 배치에 모든 정규 코드가 최소 1회 들어가도록 할 수 있습니다.
 - 영어 코드에는 글자별 대소문자 변형을 적용합니다.
+- `보건휴가`, `경조사`, `병가`, `출산휴가`, `육아휴직`, `노조휴가`, `휴직`과 축약형은 일반 한국어 코드보다 낮은 `0.35` 가중치로 무작위 추출합니다.
+- 전체 코드 포함 설정을 켜면 희귀 코드도 생성 묶음 전체에 최소 1회 포함됩니다.
 - 정답에는 `canonical_code`와 실제 표시값 `display_code`를 모두 기록합니다.
 - 한국어, 숫자, `/`, `+`, `⁺`, `—`는 그대로 보존합니다.
 
@@ -121,4 +132,4 @@ python generate_dataset.py \
 python generate_dataset.py --count 500 --output-dir dataset_500 --seed 42
 ```
 
-Excel에 수백 개 시트를 넣으면 파일이 커질 수 있습니다. 대규모 학습에서는 PNG와 JSONL을 주 데이터로 사용하고 Excel은 검수용으로 사용하는 방식을 권장합니다.
+Excel에 수백 개 시트를 넣으면 파일이 커질 수 있습니다. 통합 Excel은 항상 생성되며, 대규모 학습에서는 PNG와 JSONL을 주 데이터로 사용하고 Excel은 검수용으로 사용하는 방식을 권장합니다.

@@ -22,12 +22,17 @@ from __future__ import annotations
 import argparse
 import calendar
 import csv
+import html as html_lib
 import json
 import math
+import os
 import random
 import re
+import shutil
 import statistics
+import subprocess
 import sys
+import tempfile
 import textwrap
 from functools import lru_cache
 from dataclasses import dataclass, asdict, field
@@ -40,18 +45,6 @@ try:
 except Exception:  # scraper is optional; built-in fallback still works
     requests = None
     BeautifulSoup = None
-
-try:
-    from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageFont
-except Exception as exc:
-    raise RuntimeError('Pillow is required. Install with: pip install Pillow') from exc
-
-try:
-    from artifact_tool import Workbook, SpreadsheetFile
-except Exception as exc:
-    raise RuntimeError(
-        'artifact_tool is required for Excel export in the Codex/ChatGPT environment.'
-    ) from exc
 
 CURRENT_YEAR = 2026
 MIN_BIRTH_YEAR = 1966  # age 60 in 2026
@@ -195,6 +188,20 @@ GROUP_WEIGHTS = {
     'role': 0.035,
     'korean': 0.05,
 }
+
+# These leave types are intentionally rarer in real schedules. They retain
+# full dictionary coverage through ensure_all_codes, but are sampled less often
+# during ordinary random generation.
+RARE_KOREAN_CODES = {
+    '보', '보건', '보건휴가',
+    '경', '경조', '경조사',
+    '병', '병가',
+    '출', '출산', '출산휴가',
+    '육', '육아', '육아휴직',
+    '노', '노조', '노조휴가',
+    '휴직',
+}
+RARE_KOREAN_CODE_WEIGHT = 0.35
 
 TEMPLATE_IDS = [
     'compact_summary',
@@ -446,14 +453,29 @@ def build_name_dictionary(
 
 def parse_surname_ranking_html(html: str) -> list[SurnameEntry]:
     """Parse ranked Korean surname rows from the 2015 census mirror page."""
-    if BeautifulSoup is None:
-        return []
-    soup = BeautifulSoup(html, 'html.parser')
     found: dict[int, SurnameEntry] = {}
 
     pattern = re.compile(
         r'^\s*(\d{1,3})\s*([가-힣]{1,4})\s*\(([^)\n]+)\)\s*([\d,]+)\s*$'
     )
+
+    if BeautifulSoup is None:
+        plain_html = re.sub(r'</(?:tr|p|div|li)>', '\n', html, flags=re.IGNORECASE)
+        plain_html = html_lib.unescape(re.sub(r'<[^>]+>', ' ', plain_html))
+        for line in plain_html.splitlines():
+            match = pattern.match(' '.join(line.split()))
+            if not match:
+                continue
+            rank = int(match.group(1))
+            found[rank] = SurnameEntry(
+                rank=rank,
+                surname=match.group(2),
+                hanja=match.group(3),
+                population=int(match.group(4).replace(',', '')),
+            )
+        return [found[k] for k in sorted(found)]
+
+    soup = BeautifulSoup(html, 'html.parser')
 
     # Primary path: table rows.
     for tr in soup.find_all('tr'):
@@ -584,6 +606,17 @@ def mutate_ascii_case(code: str, rng: random.Random, probability: float) -> str:
     return ''.join(chars)
 
 
+def choose_code_from_group(rng: random.Random, group: str) -> str:
+    codes = SHIFT_CODE_GROUPS[group]
+    if group == 'korean':
+        code_weights = [
+            RARE_KOREAN_CODE_WEIGHT if code in RARE_KOREAN_CODES else 1.0
+            for code in codes
+        ]
+        return rng.choices(codes, weights=code_weights, k=1)[0]
+    return rng.choice(codes)
+
+
 def choose_code(rng: random.Random, previous: str | None = None) -> str:
     # Plausible transition bias for common D/E/N/OFF patterns.
     if previous:
@@ -601,7 +634,7 @@ def choose_code(rng: random.Random, previous: str | None = None) -> str:
     groups = list(GROUP_WEIGHTS)
     weights = [GROUP_WEIGHTS[g] for g in groups]
     group = rng.choices(groups, weights=weights, k=1)[0]
-    return rng.choice(SHIFT_CODE_GROUPS[group])
+    return choose_code_from_group(rng, group)
 
 
 def excel_column_name(index_1based: int) -> str:
@@ -1346,7 +1379,7 @@ def export_annotations(schedules: list[ScheduleRecord], output_dir: Path) -> Non
     write_csv(output_dir / 'annotations' / 'cells.csv', cell_csv)
 
     manifest = {
-        'dataset_version': '1.1',
+        'dataset_version': '1.2',
         'year': CURRENT_YEAR,
         'schedule_count': len(schedules),
         'all_canonical_codes': ALL_SHIFT_CODES,
@@ -1392,6 +1425,170 @@ def export_dictionaries(
     write_csv(output_dir / 'code_dictionary.csv', code_rows)
 
 
+def resolve_artifact_tool_runtime() -> tuple[str, Path]:
+    """Resolve the Node executable and the official artifact-tool package root."""
+    runtime_dependencies = Path(sys.executable).resolve().parent.parent
+    bundled_node_name = 'node.exe' if os.name == 'nt' else 'node'
+    bundled_node = runtime_dependencies / 'node' / 'bin' / bundled_node_name
+    node_executable = os.environ.get('ARTIFACT_TOOL_NODE')
+    if not node_executable and bundled_node.exists():
+        node_executable = str(bundled_node)
+    if not node_executable:
+        node_executable = shutil.which('node')
+    if not node_executable:
+        raise RuntimeError(
+            'Node.js is required for Excel/PNG rendering. '
+            'Set ARTIFACT_TOOL_NODE to the bundled Node executable.'
+        )
+
+    module_candidates: list[Path] = []
+    if os.environ.get('ARTIFACT_TOOL_NODE_MODULES'):
+        module_candidates.append(Path(os.environ['ARTIFACT_TOOL_NODE_MODULES']))
+    module_candidates.append(runtime_dependencies / 'node' / 'node_modules')
+    project_modules = Path(__file__).resolve().parent / 'node_modules'
+    module_candidates.append(project_modules)
+    node_path = Path(node_executable).resolve()
+    module_candidates.extend([
+        node_path.parent.parent / 'node_modules',
+        node_path.parent.parent.parent / 'node_modules',
+    ])
+    for candidate in module_candidates:
+        if (candidate / '@oai' / 'artifact-tool').exists():
+            return str(node_executable), candidate.resolve()
+    raise RuntimeError(
+        '@oai/artifact-tool was not found. Set ARTIFACT_TOOL_NODE_MODULES '
+        'to the bundled node_modules directory.'
+    )
+
+
+def create_node_modules_link(link_path: Path, target_path: Path) -> None:
+    if os.name == 'nt':
+        completed = subprocess.run(
+            ['cmd.exe', '/d', '/c', 'mklink', '/J', str(link_path), str(target_path)],
+            capture_output=True,
+            text=True,
+            encoding='utf-8',
+            errors='replace',
+            check=False,
+        )
+        if completed.returncode != 0:
+            raise RuntimeError(f'Unable to create temporary node_modules junction: {completed.stderr}')
+    else:
+        os.symlink(target_path, link_path, target_is_directory=True)
+
+
+def build_renderer_payload(
+    schedules: list[ScheduleRecord],
+    name_entries: list[NameEntry],
+    surname_entries: list[SurnameEntry],
+    surname_pool: list[SurnameSample],
+    output_dir: Path,
+) -> dict[str, Any]:
+    sources = [
+        {
+            'source_id': 'historical_names',
+            'purpose': '1968/1978/1988/1998/2008 기준 인기 이름',
+            'url_or_reference': SOURCE_HISTORY,
+            'note': '1966~2007 각 연도는 가장 가까운 기준연도에 매핑',
+        },
+        {
+            'source_id': 'annual_names',
+            'purpose': '2008년 이후 선택적 이름 순위 수집',
+            'url_or_reference': SOURCE_BABY_NAME.format(year='{year}', page='{page}'),
+            'note': '사이트 구조 변경이나 실패 시 내장 데이터 사용',
+        },
+        {
+            'source_id': 'surname_official',
+            'purpose': '2015 성씨·본관별 인구 공식 통계표',
+            'url_or_reference': SOURCE_SURNAME_KOSIS,
+            'note': 'KOSIS 인구총조사 DT_1IN15SD',
+        },
+        {
+            'source_id': 'surname_scraper',
+            'purpose': '2015 성씨 순위 HTML 수집',
+            'url_or_reference': SOURCE_SURNAME_MIRROR,
+            'note': '수집 실패 시 내장 상위 100개 사전 사용',
+        },
+        {
+            'source_id': 'template_reference',
+            'purpose': '병원식 파트·색상·요일 근무표 레이아웃 참고',
+            'url_or_reference': SOURCE_TEMPLATE_PDF,
+            'note': '사용자가 제공한 근무표 PDF 레이아웃',
+        },
+    ]
+    return {
+        'dataset_version': '1.2',
+        'output_dir': str(output_dir),
+        'shift_code_groups': SHIFT_CODE_GROUPS,
+        'name_entries': [asdict(entry) for entry in name_entries],
+        'surname_entries': [asdict(entry) for entry in surname_entries],
+        'surname_pool': [asdict(entry) for entry in surname_pool],
+        'schedules': [asdict(schedule) for schedule in schedules],
+        'sources': sources,
+    }
+
+
+def render_dataset_workbook(
+    schedules: list[ScheduleRecord],
+    name_entries: list[NameEntry],
+    surname_entries: list[SurnameEntry],
+    surname_pool: list[SurnameSample],
+    output_dir: Path,
+) -> None:
+    """Create the workbook and render every schedule sheet to a clean 2x PNG."""
+    node_executable, node_modules = resolve_artifact_tool_runtime()
+    renderer_source = Path(__file__).resolve().with_name('render_workbook.mjs')
+    if not renderer_source.exists():
+        raise RuntimeError(f'Renderer script not found: {renderer_source}')
+    payload = build_renderer_payload(
+        schedules,
+        name_entries,
+        surname_entries,
+        surname_pool,
+        output_dir,
+    )
+
+    with tempfile.TemporaryDirectory(prefix='shift-schedule-render-') as temp_name:
+        temp_dir = Path(temp_name)
+        payload_path = temp_dir / 'payload.json'
+        result_path = temp_dir / 'result.json'
+        renderer_path = temp_dir / 'render_workbook.mjs'
+        node_modules_link = temp_dir / 'node_modules'
+        payload_path.write_text(json.dumps(payload, ensure_ascii=False), encoding='utf-8')
+        shutil.copy2(renderer_source, renderer_path)
+        create_node_modules_link(node_modules_link, node_modules)
+        try:
+            completed = subprocess.run(
+                [node_executable, str(renderer_path), str(payload_path), str(result_path)],
+                cwd=temp_dir,
+                capture_output=True,
+                text=True,
+                encoding='utf-8',
+                errors='replace',
+                check=False,
+            )
+            if completed.returncode != 0:
+                detail = completed.stderr.strip() or completed.stdout.strip()
+                raise RuntimeError(f'Excel/PNG renderer failed: {detail}')
+            result = json.loads(result_path.read_text(encoding='utf-8'))
+        finally:
+            if node_modules_link.exists():
+                os.rmdir(node_modules_link)
+
+    by_schedule_id = {item['schedule_id']: item for item in result['schedules']}
+    for schedule in schedules:
+        rendered = by_schedule_id[schedule.schedule_id]
+        schedule.clean_image_path = rendered['clean_image_path']
+        schedule.image_width = rendered['image_width']
+        schedule.image_height = rendered['image_height']
+        schedule.cell_annotations = rendered['cell_annotations']
+        by_row_id = {item['row_id']: item for item in rendered['rows']}
+        for row in schedule.rows:
+            row_layout = by_row_id[row.row_id]
+            row.excel_row = row_layout['excel_row']
+            row.name_cell = row_layout['name_cell']
+
+
 def generate_dataset(
     config: GeneratorConfig,
     force_template_cycle: bool = False,
@@ -1430,13 +1627,14 @@ def generate_dataset(
     if config.ensure_all_codes:
         ensure_code_coverage(schedules, rng, config.case_mutation_probability)
 
-    for schedule in schedules:
-        image_path = output_dir / 'images' / f'{schedule.schedule_id}_{schedule.template_id}.png'
-        render_schedule_png(schedule, image_path, rng)
-        schedule.clean_image_path = str(Path('images') / image_path.name)
-
     xlsx_path = output_dir / 'synthetic_shift_dataset.xlsx'
-    export_dataset_xlsx(schedules, name_entries, surname_entries, xlsx_path)
+    render_dataset_workbook(
+        schedules,
+        name_entries,
+        surname_entries,
+        surname_pool,
+        output_dir,
+    )
     export_annotations(schedules, output_dir)
     export_dictionaries(name_entries, surname_entries, output_dir)
     return schedules, name_entries, xlsx_path
