@@ -16,6 +16,7 @@ import os
 import random
 import shutil
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 from typing import Any, IO, Sequence
@@ -484,7 +485,12 @@ def create_answer_index(output_dir: Path, count: int) -> Path:
                 detail = completed.stderr.strip() or completed.stdout.strip()
                 raise RuntimeError(f'Answer-index builder failed: {detail}')
             if completed.stdout.strip():
-                print(completed.stdout.strip(), flush=True)
+                console_encoding = sys.stdout.encoding or 'utf-8'
+                console_output = completed.stdout.strip().encode(
+                    console_encoding,
+                    errors='replace',
+                ).decode(console_encoding)
+                print(console_output, flush=True)
         finally:
             if node_modules_link.exists():
                 os.rmdir(node_modules_link)
