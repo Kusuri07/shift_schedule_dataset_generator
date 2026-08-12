@@ -1,0 +1,7 @@
+# Fixed CTC charset v1. Do not reorder or edit after training a released model.
+# Add a new versioned file when the supported character set changes.
+@chars 0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz
+@chars +-⁺/—_.,:;()[]%#&·
+@range 0020-0020
+@range 3131-318E
+@range AC00-D7A3

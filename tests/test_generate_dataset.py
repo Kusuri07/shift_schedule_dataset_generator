@@ -165,7 +165,7 @@ class ShiftDatasetGeneratorTests(unittest.TestCase):
                 (Path(tmp) / 'annotations' / 'manifest.json').read_text(encoding='utf-8')
             )
         page = manifest['schedules'][0]
-        self.assertEqual(manifest['dataset_version'], '1.3')
+        self.assertEqual(manifest['dataset_version'], '2.0')
         self.assertEqual(page['page_number'], 3)
         self.assertEqual(page['page_count'], 4)
         self.assertEqual(page['page_label'], '페이지 3/4')
@@ -194,7 +194,7 @@ class ShiftDatasetGeneratorTests(unittest.TestCase):
             [schedule], names, surnames, surname_pool, Path('unused'),
             export_workbook=False,
         )
-        self.assertEqual(payload['dataset_version'], '1.3')
+        self.assertEqual(payload['dataset_version'], '2.0')
         self.assertFalse(payload['export_workbook'])
         self.assertEqual(payload['schedules'][0]['page_label'], '페이지 1/2')
 
@@ -255,6 +255,11 @@ class ShiftDatasetGeneratorTests(unittest.TestCase):
             self.assertGreater(schedule.image_height, 300)
             self.assertEqual(len(schedule.cell_annotations), 3 * 28)
             self.assertTrue(all(len(a['bbox_px']) == 4 for a in schedule.cell_annotations))
+            self.assertTrue(all(len(a['cell_polygon']) == 4 for a in schedule.cell_annotations))
+            self.assertTrue(all(len(a['text_polygon']) == 4 for a in schedule.cell_annotations))
+            self.assertTrue(all(a['display_text'] == a['display_code'] for a in schedule.cell_annotations))
+            self.assertTrue(any(a['object_type'] == 'title' for a in schedule.training_objects))
+            self.assertTrue(any(a['object_type'] == 'name' for a in schedule.training_objects))
             self.assertTrue(all(a['surname'] for a in schedule.cell_annotations))
             self.assertTrue(all(a['surname_rank'] >= 1 for a in schedule.cell_annotations))
             self.assertTrue(all(

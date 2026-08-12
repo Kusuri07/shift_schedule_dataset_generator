@@ -11,3 +11,8 @@ node_modules/
 outputs/
 tmp/
 *.inspect.ndjson
+.smoke*/
+training_dataset/
+runs/
+exports/
+captures/

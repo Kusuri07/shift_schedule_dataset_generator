@@ -8,7 +8,8 @@ const RENDER_SCALE = 2;
 const DAY_COLUMN_WIDTH_PX = 48;
 const BODY_ROW_HEIGHT_PX = 28;
 const THIN_GRID = { preset: "all", style: "thin", color: "#9A9A9A" };
-const GROUP_TEMPLATES = new Set(["compact_summary", "grouped_hospital", "parted_pdf"]);
+const GROUP_TEMPLATES = new Set(["compact_summary", "grouped_hospital", "parted_pdf", "ood_name_group_swapped"]);
+let TEXT_MASK_MODE = false;
 
 
 function excelColumnName(index1Based) {
@@ -33,6 +34,14 @@ function pngDimensions(bytes) {
 
 
 function applyStyle(range, options = {}) {
+  if (TEXT_MASK_MODE) {
+    options = {
+      ...options,
+      fill: "#FFFFFF",
+      color: "#000000",
+      borders: { preset: "all", style: "thin", color: "#FFFFFF" },
+    };
+  }
   range.format = {
     fill: options.fill ?? "#FFFFFF",
     font: {
@@ -62,6 +71,7 @@ function setRowHeight(sheet, rowIndex, heightPx) {
 function summaryLabels(templateId) {
   if (templateId === "compact_summary") return ["D", "E", "N", "OFF", "연차"];
   if (templateId === "grouped_hospital") return ["D", "E", "N", "OFF"];
+  if (templateId === "ood_summary_left") return ["D", "E", "N", "OFF", "연차"];
   return [];
 }
 
@@ -114,30 +124,45 @@ function codeFontSize(code) {
 function scheduleLayout(schedule) {
   const groupColumn = GROUP_TEMPLATES.has(schedule.template_id);
   const noteRow = new Set(["grouped_hospital", "parted_pdf"]).has(schedule.template_id);
-  const dayStartColumn = groupColumn ? 2 : 1;
+  const nameFirst = schedule.template_id === "ood_name_group_swapped";
+  const summaryBeforeDays = schedule.template_id === "ood_summary_left";
   const summaries = summaryLabels(schedule.template_id);
   const headerStartRow = noteRow ? 2 : 1;
-  const bodyStartRow = headerStartRow + 2;
-  const totalColumns = dayStartColumn + schedule.day_count + summaries.length;
+  const headerRows = schedule.template_id === "ood_multi_header" ? 3 : 2;
+  const bodyStartRow = headerStartRow + headerRows;
+  const leadingColumns = groupColumn ? 2 : 1;
+  const dayStartColumn = leadingColumns + (summaryBeforeDays ? summaries.length : 0);
+  const summaryStartColumn = summaryBeforeDays ? leadingColumns : dayStartColumn + schedule.day_count;
+  const totalColumns = leadingColumns + schedule.day_count + summaries.length;
   const totalRows = bodyStartRow + schedule.rows.length;
 
-  const columnWidths = [];
-  if (groupColumn) columnWidths.push(schedule.template_id === "compact_summary" ? 64 : 92);
-  columnWidths.push(112);
-  for (let day = 0; day < schedule.day_count; day += 1) columnWidths.push(DAY_COLUMN_WIDTH_PX);
-  for (let index = 0; index < summaries.length; index += 1) columnWidths.push(54);
+  const nameColumn = nameFirst ? 0 : groupColumn ? 1 : 0;
+  const groupColumnIndex = groupColumn ? (nameFirst ? 1 : 0) : null;
+  const columnWidths = Array(totalColumns).fill(DAY_COLUMN_WIDTH_PX);
+  columnWidths[nameColumn] = 112;
+  if (groupColumn) columnWidths[groupColumnIndex] = schedule.template_id === "compact_summary" ? 64 : 92;
+  for (let index = 0; index < summaries.length; index += 1) columnWidths[summaryStartColumn + index] = 54;
+  if (schedule.template_id === "ood_irregular_columns") {
+    for (let day = 0; day < schedule.day_count; day += 1) columnWidths[dayStartColumn + day] = [38, 46, 58, 43][day % 4];
+  }
 
   const rowHeights = [38];
   if (noteRow) rowHeights.push(28);
-  rowHeights.push(27, 27);
+  for (let index = 0; index < headerRows; index += 1) rowHeights.push(index === 0 && headerRows === 3 ? 24 : 27);
   for (let index = 0; index < schedule.rows.length; index += 1) rowHeights.push(BODY_ROW_HEIGHT_PX);
 
   return {
     groupColumn,
+    nameColumn,
+    groupColumnIndex,
+    nameFirst,
+    summaryBeforeDays,
     noteRow,
     dayStartColumn,
+    summaryStartColumn,
     summaries,
     headerStartRow,
+    headerRows,
     bodyStartRow,
     totalColumns,
     totalRows,
@@ -191,28 +216,40 @@ function configureScheduleSheet(sheet, schedule, layout) {
 
   const headerRow = layout.headerStartRow;
   if (layout.groupColumn) {
-    sheet.mergeCells(`A${headerRow + 1}:A${headerRow + 2}`);
-    sheet.getRangeByIndexes(headerRow, 0, 1, 1).values = [[schedule.template_id === "compact_summary" ? "병동" : "구분"]];
-    sheet.mergeCells(`B${headerRow + 1}:B${headerRow + 2}`);
-    sheet.getRangeByIndexes(headerRow, 1, 1, 1).values = [["성명"]];
+    const groupLetter = excelColumnName(layout.groupColumnIndex + 1);
+    const nameLetter = excelColumnName(layout.nameColumn + 1);
+    sheet.mergeCells(`${groupLetter}${headerRow + 1}:${groupLetter}${headerRow + layout.headerRows}`);
+    sheet.getRangeByIndexes(headerRow, layout.groupColumnIndex, 1, 1).values = [[schedule.template_id === "compact_summary" ? "병동" : "구분"]];
+    sheet.mergeCells(`${nameLetter}${headerRow + 1}:${nameLetter}${headerRow + layout.headerRows}`);
+    sheet.getRangeByIndexes(headerRow, layout.nameColumn, 1, 1).values = [["성명"]];
   } else {
-    sheet.mergeCells(`A${headerRow + 1}:A${headerRow + 2}`);
+    sheet.mergeCells(`A${headerRow + 1}:A${headerRow + layout.headerRows}`);
     sheet.getRangeByIndexes(headerRow, 0, 1, 1).values = [["성명"]];
   }
 
-  applyStyle(sheet.getRangeByIndexes(headerRow, 0, 2, layout.totalColumns), {
+  applyStyle(sheet.getRangeByIndexes(headerRow, 0, layout.headerRows, layout.totalColumns), {
     fill: "#F1F4F5",
     bold: true,
     size: 10,
   });
 
+  const dateRow = headerRow + (layout.headerRows === 3 ? 1 : 0);
+  const weekdayRow = dateRow + 1;
+  if (layout.headerRows === 3) {
+    const firstDay = excelColumnName(layout.dayStartColumn + 1);
+    const lastDay = excelColumnName(layout.dayStartColumn + schedule.day_count);
+    sheet.mergeCells(`${firstDay}${headerRow + 1}:${lastDay}${headerRow + 1}`);
+    sheet.getRangeByIndexes(headerRow, layout.dayStartColumn, 1, 1).values = [[`${schedule.year}년 ${schedule.month}월 근무 일정`]];
+    applyStyle(sheet.getRangeByIndexes(headerRow, layout.dayStartColumn, 1, schedule.day_count), { fill: "#DDEBF7", bold: true, size: 10 });
+  }
+
   for (let dayIndex = 0; dayIndex < schedule.day_count; dayIndex += 1) {
     const column = layout.dayStartColumn + dayIndex;
     const weekday = schedule.weekdays[dayIndex];
     const weekendFill = weekday === "일" ? "#FCE8E6" : weekday === "토" ? "#E8F0FE" : "#F6F8F8";
-    sheet.getRangeByIndexes(headerRow, column, 1, 1).values = [[dayIndex + 1]];
-    sheet.getRangeByIndexes(headerRow + 1, column, 1, 1).values = [[weekday]];
-    applyStyle(sheet.getRangeByIndexes(headerRow, column, 2, 1), {
+    sheet.getRangeByIndexes(dateRow, column, 1, 1).values = [[dayIndex + 1]];
+    sheet.getRangeByIndexes(weekdayRow, column, 1, 1).values = [[weekday]];
+    applyStyle(sheet.getRangeByIndexes(dateRow, column, 2, 1), {
       fill: weekendFill,
       bold: true,
       color: weekday === "일" ? "#C5221F" : weekday === "토" ? "#185ABC" : "#222222",
@@ -220,12 +257,12 @@ function configureScheduleSheet(sheet, schedule, layout) {
     });
   }
 
-  const summaryStartColumn = layout.dayStartColumn + schedule.day_count;
+  const summaryStartColumn = layout.summaryStartColumn;
   layout.summaries.forEach((label, index) => {
     const column = summaryStartColumn + index;
-    sheet.mergeCells(`${excelColumnName(column + 1)}${headerRow + 1}:${excelColumnName(column + 1)}${headerRow + 2}`);
+    sheet.mergeCells(`${excelColumnName(column + 1)}${headerRow + 1}:${excelColumnName(column + 1)}${headerRow + layout.headerRows}`);
     sheet.getRangeByIndexes(headerRow, column, 1, 1).values = [[label]];
-    applyStyle(sheet.getRangeByIndexes(headerRow, column, 2, 1), { fill: "#FAFAFA", bold: true, size: 9 });
+    applyStyle(sheet.getRangeByIndexes(headerRow, column, layout.headerRows, 1), { fill: "#FAFAFA", bold: true, size: 9 });
   });
 
   for (let rowIndex = 0; rowIndex < schedule.rows.length; rowIndex += 1) {
@@ -235,10 +272,10 @@ function configureScheduleSheet(sheet, schedule, layout) {
     applyStyle(sheet.getRangeByIndexes(row, 0, 1, layout.totalColumns), { fill: alternatingFill, size: 9 });
 
     if (layout.groupColumn) {
-      sheet.getRangeByIndexes(row, 0, 1, 1).values = [[person.group]];
-      sheet.getRangeByIndexes(row, 1, 1, 1).values = [[person.name]];
-      applyStyle(sheet.getRangeByIndexes(row, 0, 1, 1), { fill: groupFill(person.group), bold: true, size: 10 });
-      applyStyle(sheet.getRangeByIndexes(row, 1, 1, 1), {
+      sheet.getRangeByIndexes(row, layout.groupColumnIndex, 1, 1).values = [[person.group]];
+      sheet.getRangeByIndexes(row, layout.nameColumn, 1, 1).values = [[person.name]];
+      applyStyle(sheet.getRangeByIndexes(row, layout.groupColumnIndex, 1, 1), { fill: groupFill(person.group), bold: true, size: 10 });
+      applyStyle(sheet.getRangeByIndexes(row, layout.nameColumn, 1, 1), {
         fill: schedule.template_id === "parted_pdf" ? groupFill(person.group) : alternatingFill,
         size: 10,
       });
@@ -281,7 +318,7 @@ function configureScheduleSheet(sheet, schedule, layout) {
     }
   }
 
-  if (new Set(["grouped_hospital", "parted_pdf"]).has(schedule.template_id)) {
+  if (new Set(["grouped_hospital", "parted_pdf", "ood_name_group_swapped"]).has(schedule.template_id)) {
     let start = 0;
     while (start < schedule.rows.length) {
       let end = start;
@@ -289,9 +326,10 @@ function configureScheduleSheet(sheet, schedule, layout) {
       if (end > start) {
         const firstRow = layout.bodyStartRow + start + 1;
         const lastRow = layout.bodyStartRow + end + 1;
-        sheet.mergeCells(`A${firstRow}:A${lastRow}`);
-        sheet.getRange(`A${firstRow}`).values = [[schedule.rows[start].group]];
-        applyStyle(sheet.getRange(`A${firstRow}:A${lastRow}`), {
+        const groupLetter = excelColumnName(layout.groupColumnIndex + 1);
+        sheet.mergeCells(`${groupLetter}${firstRow}:${groupLetter}${lastRow}`);
+        sheet.getRange(`${groupLetter}${firstRow}`).values = [[schedule.rows[start].group]];
+        applyStyle(sheet.getRange(`${groupLetter}${firstRow}:${groupLetter}${lastRow}`), {
           fill: groupFill(schedule.rows[start].group),
           bold: true,
           size: 11,
@@ -336,10 +374,117 @@ function makeCellAnnotations(schedule, layout, imageWidth, imageHeight) {
   for (const height of layout.rowHeights) yEdges.push(yEdges.at(-1) + height);
   const annotations = [];
 
+  function cellGeometry(row, column, rowSpan = 1, columnSpan = 1) {
+    const left = Math.round(xEdges[column] * xScale);
+    const top = Math.round(yEdges[row] * yScale);
+    const right = Math.round(xEdges[column + columnSpan] * xScale);
+    const bottom = Math.round(yEdges[row + rowSpan] * yScale);
+    return {
+      bbox: [left, top, right, bottom],
+      polygon: [[left, top], [right, top], [right, bottom], [left, bottom]],
+    };
+  }
+
+  // artifact-tool exposes the same explicit row/column layout that is rendered.
+  // Text is center aligned in these sheets, so derive a conservative text layout
+  // quadrilateral from that layout.  The training validator can replace this with
+  // a glyph-mask/difference polygon when the rendered glyph check exceeds 2 px.
+  function textGeometry(row, column, text, fontSize, rowSpan = 1, columnSpan = 1, align = "center") {
+    const { bbox } = cellGeometry(row, column, rowSpan, columnSpan);
+    const characters = [...String(text ?? "")];
+    const hangul = characters.filter((char) => /[\u3131-\u318E\uAC00-\uD7A3]/u.test(char)).length;
+    const ascii = characters.length - hangul;
+    const scale = Math.min(xScale, yScale);
+    const estimatedWidth = Math.max(2, (hangul * fontSize + ascii * fontSize * 0.62) * scale);
+    const estimatedHeight = Math.max(2, fontSize * 1.25 * scale);
+    const padding = Math.max(2, estimatedHeight * 0.05);
+    const availableWidth = Math.max(2, bbox[2] - bbox[0] - 4);
+    const availableHeight = Math.max(2, bbox[3] - bbox[1] - 4);
+    const width = Math.min(availableWidth, estimatedWidth + 2 * padding);
+    const height = Math.min(availableHeight, estimatedHeight + 2 * padding);
+    const centerY = (bbox[1] + bbox[3]) / 2;
+    let left;
+    if (align === "left") left = bbox[0] + Math.min(6 * xScale, availableWidth - width);
+    else left = (bbox[0] + bbox[2] - width) / 2;
+    const top = centerY - height / 2;
+    const right = left + width;
+    const bottom = top + height;
+    return [
+      [Math.round(left), Math.round(top)],
+      [Math.round(right), Math.round(top)],
+      [Math.round(right), Math.round(bottom)],
+      [Math.round(left), Math.round(bottom)],
+    ];
+  }
+
+  const trainingObjects = [];
+  function pushObject({
+    objectType, displayText, row, column, rowSpan = 1, columnSpan = 1,
+    fontSize = 9, align = "center", rowId = null, rowIndex = null,
+    day = null, canonicalCode = null,
+  }) {
+    if (displayText === null || displayText === undefined || String(displayText) === "") return;
+    const geometry = cellGeometry(row, column, rowSpan, columnSpan);
+    trainingObjects.push({
+      schedule_id: schedule.schedule_id,
+      template_id: schedule.template_id,
+      object_type: objectType,
+      display_text: String(displayText).normalize("NFC"),
+      canonical_code: canonicalCode,
+      row_id: rowId,
+      row_index: rowIndex,
+      day,
+      bbox_px: geometry.bbox,
+      cell_polygon: geometry.polygon,
+      text_polygon: textGeometry(row, column, displayText, fontSize, rowSpan, columnSpan, align),
+      text_polygon_source: "layout_bounds",
+      visibility: 1.0,
+      ignore: false,
+    });
+  }
+
+  const pageBadgeColumns = schedule.page_label ? 2 : 0;
+  const titleColumns = layout.totalColumns - pageBadgeColumns;
+  pushObject({ objectType: "title", displayText: schedule.title, row: 0, column: 0, columnSpan: titleColumns, fontSize: 15 });
+  if (pageBadgeColumns) {
+    pushObject({ objectType: "page_label", displayText: schedule.page_label, row: 0, column: titleColumns, columnSpan: pageBadgeColumns, fontSize: 9 });
+  }
+  if (layout.noteRow) {
+    pushObject({
+      objectType: "notice",
+      displayText: "공지사항: 합성 데이터 / 실제 직원 정보 아님 / 모든 코드는 학습용 무작위 생성",
+      row: 1,
+      column: 0,
+      columnSpan: layout.totalColumns,
+      fontSize: 9,
+      align: "left",
+    });
+  }
+  const headerRow = layout.headerStartRow;
+  if (layout.groupColumn) {
+    pushObject({ objectType: "group_header", displayText: schedule.template_id === "compact_summary" ? "병동" : "구분", row: headerRow, column: layout.groupColumnIndex, rowSpan: layout.headerRows, fontSize: 10 });
+    pushObject({ objectType: "name_header", displayText: "성명", row: headerRow, column: layout.nameColumn, rowSpan: layout.headerRows, fontSize: 10 });
+  } else {
+    pushObject({ objectType: "name_header", displayText: "성명", row: headerRow, column: 0, rowSpan: layout.headerRows, fontSize: 10 });
+  }
+  const annotationDateRow = headerRow + (layout.headerRows === 3 ? 1 : 0);
+  if (layout.headerRows === 3) {
+    pushObject({ objectType: "month_header", displayText: `${schedule.year}년 ${schedule.month}월 근무 일정`, row: headerRow, column: layout.dayStartColumn, columnSpan: schedule.day_count, fontSize: 10 });
+  }
+  schedule.weekdays.forEach((weekday, dayIndex) => {
+    const column = layout.dayStartColumn + dayIndex;
+    pushObject({ objectType: "date_header", displayText: dayIndex + 1, row: annotationDateRow, column, fontSize: 9, day: dayIndex + 1 });
+    pushObject({ objectType: "weekday_header", displayText: weekday, row: annotationDateRow + 1, column, fontSize: 9, day: dayIndex + 1 });
+  });
+
+  layout.summaries.forEach((label, index) => {
+    pushObject({ objectType: "summary_header", displayText: label, row: headerRow, column: layout.summaryStartColumn + index, rowSpan: layout.headerRows, fontSize: 9 });
+  });
+
   schedule.rows.forEach((person, rowIndex) => {
     const sheetRowIndex = layout.bodyStartRow + rowIndex;
     const excelRow = sheetRowIndex + 1;
-    const nameColumn = layout.groupColumn ? 1 : 0;
+    const nameColumn = layout.nameColumn;
     person.excel_row = excelRow;
     person.name_cell = `${excelColumnName(nameColumn + 1)}${excelRow}`;
     const nameBox = [
@@ -348,8 +493,23 @@ function makeCellAnnotations(schedule, layout, imageWidth, imageHeight) {
       Math.round(xEdges[nameColumn + 1] * xScale),
       Math.round(yEdges[sheetRowIndex + 1] * yScale),
     ];
+    const nameGeometry = cellGeometry(sheetRowIndex, nameColumn);
+    pushObject({
+      objectType: "name", displayText: person.name, row: sheetRowIndex, column: nameColumn,
+      fontSize: 10, rowId: person.row_id, rowIndex: rowIndex + 1,
+    });
+    if (layout.groupColumn && (rowIndex === 0 || schedule.rows[rowIndex - 1].group !== person.group)) {
+      let groupRowSpan = 1;
+      while (rowIndex + groupRowSpan < schedule.rows.length && schedule.rows[rowIndex + groupRowSpan].group === person.group) groupRowSpan += 1;
+      pushObject({
+        objectType: "group", displayText: person.group, row: sheetRowIndex, column: layout.groupColumnIndex,
+        rowSpan: groupRowSpan, fontSize: 10, rowId: person.row_id, rowIndex: rowIndex + 1,
+      });
+    }
     person.codes_display.forEach((displayCode, dayIndex) => {
       const column = layout.dayStartColumn + dayIndex;
+      const geometry = cellGeometry(sheetRowIndex, column);
+      const textPolygon = textGeometry(sheetRowIndex, column, displayCode, codeFontSize(displayCode));
       annotations.push({
         schedule_id: schedule.schedule_id,
         template_id: schedule.template_id,
@@ -367,17 +527,53 @@ function makeCellAnnotations(schedule, layout, imageWidth, imageHeight) {
         date: `${String(schedule.year).padStart(4, "0")}-${String(schedule.month).padStart(2, "0")}-${String(dayIndex + 1).padStart(2, "0")}`,
         canonical_code: person.codes_canonical[dayIndex],
         display_code: displayCode,
-        bbox_px: [
-          Math.round(xEdges[column] * xScale),
-          Math.round(yEdges[sheetRowIndex] * yScale),
-          Math.round(xEdges[column + 1] * xScale),
-          Math.round(yEdges[sheetRowIndex + 1] * yScale),
-        ],
+        display_text: String(displayCode).normalize("NFC"),
+        object_type: "shift_code",
+        bbox_px: geometry.bbox,
+        cell_polygon: geometry.polygon,
+        text_polygon: textPolygon,
+        text_polygon_source: "layout_bounds",
+        visibility: 1.0,
+        ignore: false,
         name_bbox_px: nameBox,
+        name_cell_polygon: nameGeometry.polygon,
+      });
+      pushObject({
+        objectType: "shift_code", displayText: displayCode, row: sheetRowIndex, column,
+        fontSize: codeFontSize(displayCode), rowId: person.row_id, rowIndex: rowIndex + 1,
+        day: dayIndex + 1, canonicalCode: person.codes_canonical[dayIndex],
       });
     });
+
+    if (layout.summaries.length > 0) {
+      const normalized = person.codes_canonical.map((code) => String(code).toUpperCase());
+      const counts = {
+        D: normalized.filter((code) => code === "D").length,
+        E: normalized.filter((code) => code === "E").length,
+        N: normalized.filter((code) => code === "N").length,
+        OFF: normalized.filter((code) => ["OFF", "O", "F", "OF"].includes(code)).length,
+        연차: person.codes_canonical.filter((code) => ["연", "연차", "연가", "AL", "A/L"].includes(code)).length,
+      };
+      layout.summaries.forEach((label, index) => {
+        pushObject({
+          objectType: "summary_value", displayText: counts[label] ?? 0,
+          row: sheetRowIndex, column: layout.summaryStartColumn + index,
+          fontSize: 9, rowId: person.row_id, rowIndex: rowIndex + 1,
+        });
+      });
+    }
   });
-  return annotations;
+  return { annotations, trainingObjects };
+}
+
+
+function configureTextMaskSheet(sheet, schedule, layout) {
+  TEXT_MASK_MODE = true;
+  try {
+    configureScheduleSheet(sheet, schedule, layout);
+  } finally {
+    TEXT_MASK_MODE = false;
+  }
 }
 
 
@@ -489,6 +685,7 @@ function populateGroundTruthSheets(workbook, schedules) {
 
   const rowRows = [];
   const cellRows = [];
+  const objectRows = [];
   for (const schedule of schedules) {
     for (let rowIndex = 0; rowIndex < schedule.rows.length; rowIndex += 1) {
       const person = schedule.rows[rowIndex];
@@ -512,8 +709,19 @@ function populateGroundTruthSheets(workbook, schedules) {
         schedule.page_label, annotation.row_id, annotation.row_index,
         annotation.name, annotation.surname, annotation.surname_rank, annotation.surname_population,
         annotation.birth_year, annotation.gender, annotation.group, annotation.day, annotation.date,
-        annotation.canonical_code, annotation.display_code, excelCell,
-        JSON.stringify(annotation.bbox_px), JSON.stringify(annotation.name_bbox_px), schedule.clean_image_path,
+        annotation.canonical_code, annotation.display_code, annotation.display_text, annotation.object_type, excelCell,
+        JSON.stringify(annotation.bbox_px), JSON.stringify(annotation.cell_polygon), JSON.stringify(annotation.text_polygon),
+        annotation.text_polygon_source, JSON.stringify(annotation.name_bbox_px), JSON.stringify(annotation.name_cell_polygon), schedule.clean_image_path,
+      ]);
+    }
+    for (const annotation of schedule.training_objects) {
+      objectRows.push([
+        annotation.schedule_id, annotation.template_id, annotation.object_type,
+        annotation.display_text, annotation.canonical_code, annotation.row_id,
+        annotation.row_index, annotation.day, JSON.stringify(annotation.bbox_px),
+        JSON.stringify(annotation.cell_polygon), JSON.stringify(annotation.text_polygon),
+        annotation.text_polygon_source, annotation.visibility, annotation.ignore,
+        schedule.clean_image_path, schedule.image_width, schedule.image_height,
       ]);
     }
   }
@@ -522,9 +730,13 @@ function populateGroundTruthSheets(workbook, schedules) {
     headerFill: "#C65911",
     columnWidths: Array(26).fill(150),
   });
-  addTableSheet(workbook, "ground_truth_cells", ["schedule_id", "template_id", "page_number", "page_count", "page_label", "row_id", "row_index", "name", "surname", "surname_rank", "surname_population", "birth_year", "gender", "group", "day", "date", "canonical_code", "display_code", "excel_cell", "bbox_px_json", "name_bbox_px_json", "image_path"], cellRows, {
+  addTableSheet(workbook, "ground_truth_cells", ["schedule_id", "template_id", "page_number", "page_count", "page_label", "row_id", "row_index", "name", "surname", "surname_rank", "surname_population", "birth_year", "gender", "group", "day", "date", "canonical_code", "display_code", "display_text", "object_type", "excel_cell", "bbox_px_json", "cell_polygon_json", "text_polygon_json", "text_polygon_source", "name_bbox_px_json", "name_cell_polygon_json", "image_path"], cellRows, {
     headerFill: "#BF9000",
-    columnWidths: Array(22).fill(150),
+    columnWidths: Array(28).fill(150),
+  });
+  addTableSheet(workbook, "ground_truth_objects", ["schedule_id", "template_id", "object_type", "display_text", "canonical_code", "row_id", "row_index", "day", "bbox_px_json", "cell_polygon_json", "text_polygon_json", "text_polygon_source", "visibility", "ignore", "image_path", "image_width", "image_height"], objectRows, {
+    headerFill: "#548235",
+    columnWidths: Array(17).fill(150),
   });
 }
 
@@ -610,12 +822,31 @@ async function main() {
     schedule.clean_image_path = path.posix.join("images", imageName);
     schedule.image_width = dimensions.width;
     schedule.image_height = dimensions.height;
-    schedule.cell_annotations = makeCellAnnotations(
+    const generatedAnnotations = makeCellAnnotations(
       schedule,
       layout,
       dimensions.width,
       dimensions.height,
     );
+    schedule.cell_annotations = generatedAnnotations.annotations;
+    schedule.training_objects = generatedAnnotations.trainingObjects;
+
+    const maskWorkbook = Workbook.create();
+    const maskSheet = maskWorkbook.worksheets.add("text_mask");
+    configureTextMaskSheet(maskSheet, schedule, layout);
+    const maskBlob = await maskWorkbook.render({
+      sheetName: "text_mask",
+      range: layout.usedRange,
+      scale: RENDER_SCALE,
+      format: "png",
+      headers: false,
+    });
+    const maskBytes = new Uint8Array(await maskBlob.arrayBuffer());
+    const maskDirectory = path.join(payload.output_dir, ".glyph_masks");
+    await fs.mkdir(maskDirectory, { recursive: true });
+    const maskName = `${schedule.schedule_id}_${schedule.template_id}_mask.png`;
+    await fs.writeFile(path.join(maskDirectory, maskName), maskBytes);
+    schedule.glyph_mask_path = path.posix.join(".glyph_masks", maskName);
   }
 
   if (exportWorkbook) populateGroundTruthSheets(workbook, payload.schedules);
@@ -628,7 +859,7 @@ async function main() {
   let xlsxPath = null;
   if (exportWorkbook) {
     const xlsx = await SpreadsheetFile.exportXlsx(workbook);
-    xlsxPath = path.join(payload.output_dir, "synthetic_shift_dataset.xlsx");
+    xlsxPath = path.join(payload.output_dir, payload.workbook_name ?? "synthetic_shift_dataset.xlsx");
     await xlsx.save(xlsxPath);
     await fs.rm(`${xlsxPath}.inspect.ndjson`, { force: true });
   }
@@ -652,6 +883,8 @@ async function main() {
         name_cell: person.name_cell,
       })),
       cell_annotations: schedule.cell_annotations,
+      training_objects: schedule.training_objects,
+      glyph_mask_path: schedule.glyph_mask_path,
     })),
   };
   await fs.writeFile(resultPath, JSON.stringify(result), "utf8");

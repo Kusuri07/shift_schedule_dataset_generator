@@ -1,0 +1,18 @@
+{
+  "routes": {
+    "A": "table -> perspective crop -> recognizer",
+    "B": "DBNet -> recognizer -> geometric clustering -> header alignment",
+    "C": "A with B fallback",
+    "D": "run all models for experiment"
+  },
+  "recognizer": {
+    "dynamic": {"height": 48, "width_buckets": [160, 320, 640], "execution_providers": ["CPU", "XNNPACK"]},
+    "fixed": {
+      "execution_providers": ["NNAPI", "CoreML"],
+      "batches": {"160": [1, 4, 8, 16], "320": [1, 2, 4, 8], "640": [1, 2, 4]}
+    },
+    "fallback_batch": 1
+  },
+  "selection_split": "real validation",
+  "max_accuracy_loss": 0.005
+}

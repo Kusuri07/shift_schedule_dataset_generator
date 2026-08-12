@@ -164,3 +164,114 @@ python generate_dataset.py --count 500 --output-dir dataset_500 --seed 42
 ```
 
 Excel에 수백 개 시트를 넣으면 파일이 커질 수 있습니다. 통합 Excel은 항상 생성되며, 대규모 학습에서는 PNG와 JSONL을 주 데이터로 사용하고 Excel은 검수용으로 사용하는 방식을 권장합니다.
+
+## OCR 학습 파이프라인
+
+학습용 전체 데이터는 다음 명령으로 생성합니다. 기본값은 in-distribution 10,000장, 기존 5개 템플릿과 겹치지 않는 OOD layout 200장, 실제 촬영 대상 300 schedule/1,000장입니다. 노트북에서는 `--count 25 --ood-count 4 --skip-parquet` 정도로만 smoke test하고 전체 생성·학습은 CUDA 작업 환경에서 실행하세요.
+
+```bash
+python generate_training_dataset.py \
+  --count 10000 \
+  --ood-count 200 \
+  --output-dir training_dataset \
+  --render-chunk-size 25
+```
+
+이 명령은 어떤 PNG나 crop도 만들기 전에 `splits/master_split.jsonl`을 만들고 SHA-256을 잠급니다. 모든 합성 원본·실제 촬영본·등록 결과·증강 recipe·recognition crop은 `schedule_id`로 이 split을 상속합니다. Train만 `cv_fold=0|1|2`이고 Validation/Test/OOD는 항상 `-1`입니다. loader는 자체 split을 만들지 않으며 unknown ID, split mismatch, Validation/Test/OOD 학습 유입, Test/OOD 기반 threshold·양자화·경로 선택을 예외로 중단합니다.
+
+대량 결과는 다음 구조입니다.
+
+```text
+training_dataset/
+├── splits/master_split.jsonl
+├── splits/master_split.manifest.json
+├── workbooks/synthetic_shift_dataset_*.xlsx
+├── images/*.png
+├── annotations/
+│   ├── rows.{csv,jsonl}
+│   ├── cells.{csv,jsonl}
+│   ├── objects.{csv,jsonl}
+│   ├── charset_coverage.json
+│   └── manifest.json
+└── shards/
+    ├── train-*.parquet
+    ├── validation-*.parquet
+    ├── test-*.parquet
+    ├── ood_layout-*.parquet
+    └── image_index.parquet
+```
+
+`objects`에는 제목, 날짜·요일, 그룹·이름, 근무 코드, 집계값이 모두 들어갑니다. `bbox_px`는 `cell_polygon`의 AABB이고, `text_polygon`은 같은 text object의 전체 glyph를 표현하는 하나의 convex/min-area quadrilateral입니다. 렌더 layout bounds를 우선 쓰고 2px 검증에 실패하면 glyph mask, 마지막으로 text/no-text 렌더 차분을 사용할 수 있습니다. 개별 획 contour는 정답으로 저장하지 않습니다.
+
+CSV/JSONL/Parquet 일치 여부와 Unicode/사전 coverage는 다음처럼 다시 검사합니다.
+
+```bash
+python verify_annotations.py \
+  --annotations-dir training_dataset/annotations \
+  --shard-dir training_dataset/shards
+
+python check_charset.py \
+  --objects training_dataset/annotations/objects.jsonl \
+  --output training_dataset/annotations/charset_coverage.recheck.json
+```
+
+고정 CTC 사전은 `data/korean_charset_v1.txt`입니다. `@range` 지시자는 고정된 한글 codepoint 순서를 뜻하며 dataset 문자에서 사전을 다시 만들지 않습니다. 문자 순서는 CTC class index이므로 기존 버전을 수정하지 말고 새 버전 파일과 모델을 함께 만들어야 합니다. transcription은 NFC `display_text`이며 `⁺`, `+`, `/`, `—`, `-`와 영문 대소문자를 보존합니다. `canonical_code` 변환은 OCR 이후 `shift_ocr.canonicalize.CodeCanonicalizer`에서 수행합니다.
+
+### 실제 사진 등록
+
+```bash
+python register_real_photos.py \
+  --reference training_dataset/images/schedule_0001_clean_grid.png \
+  --photo captures/schedule_0001/front.jpg \
+  --objects captures/schedule_0001/source_objects.jsonl \
+  --master-split training_dataset/splits/master_split.jsonl \
+  --photo-path-in-dataset captures/schedule_0001/front.jpg \
+  --output captures/schedule_0001/front.registration.json
+```
+
+EXIF 방향을 먼저 적용하고 원본과 사진의 long side를 2,400px로 정규화합니다. SIFT+FLANN, 필요 시 AKAZE+BF, RANSAC Homography 순으로 진행하며 ECC는 기하학적으로 유효한 초기 Homography의 보정에만 사용합니다. 승인에는 match/inlier 수뿐 아니라 양쪽 convex-hull coverage, 공간 구역 분포, symmetric transfer error와 변환 quad의 convexity·각도·면적·종횡비가 포함됩니다. 강한 partial crop은 `--partial`을 사용해 공통 가시 영역 기준으로 평가합니다. visibility 60% 이상은 정상, 20~60%는 ignore, 20% 미만은 제거합니다.
+
+### 모델 학습과 평가
+
+별도 CUDA 환경에 `requirements-training.txt`를 설치합니다. artifact-tool은 데이터 생성에만 사용하며 학습 코드에는 의존하지 않습니다.
+
+```bash
+python train_models.py --model table \
+  --objects training_dataset/annotations/objects.jsonl \
+  --master-split training_dataset/splits/master_split.jsonl \
+  --image-root training_dataset \
+  --output-dir runs/table_pretrain
+
+python train_models.py --model recognizer \
+  --phase real_finetune --resume runs/recognizer_pretrain/best.pt \
+  --objects training_dataset/annotations/objects.jsonl \
+  --master-split training_dataset/splits/master_split.jsonl \
+  --image-root training_dataset \
+  --output-dir runs/recognizer_real
+```
+
+세 모델은 독립 학습됩니다.
+
+- DBNet: MobileNetV3-FPN, text polygon Hmean@IoU 0.5로 best 선택
+- recognizer: MobileNetV3-BiLSTM-CTC, cell exact accuracy 우선·동률 CER로 best 선택
+- table: MobileNetV3-FPN, `0.6 × cell polygon F1 + 0.4 × row accuracy`; dense head는 1/4 feature, 선택적 attention은 1/16 feature
+
+table decode는 기본 1,500 후보이며 1,200 미만 설정을 거부합니다. CUDA에서는 dry-run으로 batch를 낮추고 gradient accumulation으로 effective batch를 보완합니다. checkpoint는 best/last/주기 파일과 optimizer·scaler·RNG 상태를 저장해 완전 resume를 지원합니다. grouped 3-fold 비교는 `--cv-fold 0|1|2`로 Train 안에서만 실행합니다.
+
+최종 지표는 `evaluate_models.py metrics`로 cell exact, CER, row exact, full-schedule exact, text detection Hmean, cell polygon F1을 기록합니다. Test와 OOD는 schedule 단위 2,000회 bootstrap 95% CI를 포함하고 별도 보고합니다. A/B/C/D 경로 선택은 `select-route`에서 real Validation만 허용하며 Test/OOD 입력은 거부합니다.
+
+### ONNX와 모바일 profile
+
+```bash
+python export_mobile.py --model recognizer \
+  --checkpoint runs/recognizer_real/best.pt \
+  --output-dir exports/recognizer
+
+python quantize_models.py --model recognizer \
+  --input exports/recognizer/recognizer_dynamic_batch.onnx \
+  --output-dir exports/recognizer/quantized
+```
+
+recognizer는 CPU/XNNPACK용 dynamic-batch와 NNAPI/CoreML 비교용 fixed batch/fixed width를 모두 export합니다. width 160은 batch 1/4/8/16, 320은 1/2/4/8, 640은 1/2/4입니다. DBNet/table도 dynamic/fixed shape를 비교합니다. CNN은 static INT8 QDQ·FP16·FP32, BiLSTM recognizer는 dynamic INT8·CNN-only static INT8·FP16·FP32를 따로 평가합니다. ORT usability checker 결과와 실제 Android Validation benchmark를 `select_mobile_profile.py`에 넣은 뒤 선택된 모델 profile과 batch=1 fallback만 앱 assets에 포함합니다.
+
+앱 baseline은 새 학습 전에 `benchmark_existing_app.py`로 동일 real Validation의 기존 `DBNet→SVTR`, `SLANet→SVTR`, DBNet clustering fallback을 저장합니다. 모델·앱 commit·기기·OS·EP·입력 해상도, p50/p95 latency와 peak memory를 이후 모든 실험과 비교합니다.

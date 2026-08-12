@@ -1,5 +1,5 @@
 {
-  "dataset_version": "1.2",
+  "dataset_version": "2.0",
   "year": 2026,
   "schedule_count": 5,
   "all_canonical_codes": [
@@ -167,71 +167,86 @@
     {
       "schedule_id": "schedule_0001",
       "template_id": "compact_summary",
+      "page_number": 1,
+      "page_count": 5,
+      "page_label": "페이지 1/5",
       "year": 2026,
       "month": 10,
       "day_count": 31,
-      "people_count": 20,
+      "people_count": 22,
       "sheet_name": "schedule_0001",
       "image_path": "images/schedule_0001_compact_summary.png",
       "image_size": [
         3868,
-        1304
+        1416
       ]
     },
     {
       "schedule_id": "schedule_0002",
       "template_id": "clean_grid",
+      "page_number": 2,
+      "page_count": 5,
+      "page_label": "페이지 2/5",
       "year": 2026,
-      "month": 6,
+      "month": 4,
       "day_count": 30,
-      "people_count": 21,
+      "people_count": 30,
       "sheet_name": "schedule_0002",
       "image_path": "images/schedule_0002_clean_grid.png",
       "image_size": [
         3104,
-        1360
+        1864
       ]
     },
     {
       "schedule_id": "schedule_0003",
       "template_id": "highlighted_grid",
+      "page_number": 3,
+      "page_count": 5,
+      "page_label": "페이지 3/5",
       "year": 2026,
-      "month": 2,
-      "day_count": 28,
-      "people_count": 23,
+      "month": 1,
+      "day_count": 31,
+      "people_count": 20,
       "sheet_name": "schedule_0003",
       "image_path": "images/schedule_0003_highlighted_grid.png",
       "image_size": [
-        2912,
-        1472
+        3200,
+        1304
       ]
     },
     {
       "schedule_id": "schedule_0004",
       "template_id": "grouped_hospital",
+      "page_number": 4,
+      "page_count": 5,
+      "page_label": "페이지 4/5",
       "year": 2026,
-      "month": 9,
+      "month": 4,
       "day_count": 30,
-      "people_count": 21,
+      "people_count": 24,
       "sheet_name": "schedule_0004",
       "image_path": "images/schedule_0004_grouped_hospital.png",
       "image_size": [
         3720,
-        1416
+        1584
       ]
     },
     {
       "schedule_id": "schedule_0005",
       "template_id": "parted_pdf",
+      "page_number": 5,
+      "page_count": 5,
+      "page_label": "페이지 5/5",
       "year": 2026,
-      "month": 11,
-      "day_count": 30,
-      "people_count": 22,
+      "month": 3,
+      "day_count": 31,
+      "people_count": 28,
       "sheet_name": "schedule_0005",
       "image_path": "images/schedule_0005_parted_pdf.png",
       "image_size": [
-        3288,
-        1472
+        3384,
+        1808
       ]
     }
   ]

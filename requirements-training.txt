@@ -1,0 +1,11 @@
+-r requirements.txt
+numpy>=1.26
+opencv-python-headless>=4.10
+Pillow>=10.0
+pyarrow>=17.0
+shapely>=2.0
+torch>=2.4
+onnx>=1.16
+onnxruntime>=1.20
+onnxconverter-common>=1.14
+hypothesis>=6.100

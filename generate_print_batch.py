@@ -91,9 +91,17 @@ CELL_TRUTH_FIELDS = [
     'date',
     'canonical_code',
     'display_code',
+    'display_text',
+    'object_type',
     'excel_cell',
     'bbox_px',
+    'cell_polygon',
+    'text_polygon',
+    'text_polygon_source',
+    'visibility',
+    'ignore',
     'name_bbox_px',
+    'name_cell_polygon',
     'image_path',
 ]
 
@@ -145,6 +153,8 @@ class AnnotationWriters:
         csv_record['name_bbox_px'] = json.dumps(
             cell_record['name_bbox_px'], separators=(',', ':')
         )
+        for field in ('cell_polygon', 'text_polygon', 'name_cell_polygon'):
+            csv_record[field] = json.dumps(cell_record[field], separators=(',', ':'))
         self.cells_csv.writerow(csv_record)
         self.cell_count += 1
 
@@ -286,9 +296,17 @@ def build_records(
                         'date': annotation['date'],
                         'canonical_code': annotation['canonical_code'],
                         'display_code': annotation['display_code'],
+                        'display_text': annotation['display_text'],
+                        'object_type': annotation['object_type'],
                         'excel_cell': excel_cell,
                         'bbox_px': annotation['bbox_px'],
+                        'cell_polygon': annotation['cell_polygon'],
+                        'text_polygon': annotation['text_polygon'],
+                        'text_polygon_source': annotation['text_polygon_source'],
+                        'visibility': annotation['visibility'],
+                        'ignore': annotation['ignore'],
                         'name_bbox_px': annotation['name_bbox_px'],
+                        'name_cell_polygon': annotation['name_cell_polygon'],
                         'image_path': relative_image_path,
                     })
 
