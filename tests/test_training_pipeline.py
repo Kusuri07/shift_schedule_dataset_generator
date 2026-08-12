@@ -106,7 +106,8 @@ class InferenceAndEvaluationTests(unittest.TestCase):
         self.assertTrue(any(profile.dynamic_height and profile.dynamic_width for profile in table_profiles))
         self.assertTrue(any(not profile.dynamic_height and not profile.dynamic_width for profile in table_profiles))
         with self.assertRaises(ValueError):
-            TableStructureModel(top_k=1199)
+            TableStructureModel(top_k=1599)
+        self.assertEqual(TableStructureModel().top_k, 2048)
 
     def test_dbnet_fallback_aligns_dates_and_names(self):
         items = [

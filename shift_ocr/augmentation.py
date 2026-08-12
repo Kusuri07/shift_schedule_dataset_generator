@@ -120,7 +120,11 @@ def augment_image_and_objects(image, objects: Sequence[Mapping[str, Any]], recip
                 item[key] = transform_points(item[key], matrix)
         visibility = clipped_visibility(item["cell_polygon"], width, height)
         item["visibility"] = visibility
-        item["ignore"] = 0.20 <= visibility < 0.60
+        # Geometric augmentation may add a visibility-based ignore flag, but it
+        # cannot make a source annotation trustworthy again.  In particular,
+        # partially registered real-photo labels can remain inside the warped
+        # canvas even though their source content was already clipped.
+        item["ignore"] = bool(item.get("ignore")) or 0.20 <= visibility < 0.60
         if visibility >= 0.20:
             transformed.append(item)
     return _photometric(warped, recipe), transformed, matrix, asdict(recipe)
@@ -154,7 +158,10 @@ def bucket_width(content_width: int) -> int:
     return 640
 
 
-def rectify_cell(image, quad: Sequence[Sequence[float]], target_height: int = 48):
+def rectify_cell(
+    image, quad: Sequence[Sequence[float]], target_height: int = 48,
+    target_width: int | None = None,
+):
     import cv2
     import numpy as np
 
@@ -164,8 +171,13 @@ def rectify_cell(image, quad: Sequence[Sequence[float]], target_height: int = 48
     left = np.linalg.norm(source[3] - source[0])
     right = np.linalg.norm(source[2] - source[1])
     aspect = max(top, bottom) / max(1.0, max(left, right))
-    content_width = max(8, int(round(target_height * aspect)))
-    width = bucket_width(content_width)
+    if target_width is not None and target_width not in {160, 320, 640}:
+        raise ValueError("recognizer target_width must be 160, 320 or 640")
+    # 640 is the recognizer's largest declared width bucket.  During training,
+    # force the source annotation's indexed bucket so jitter/predicted quads
+    # cannot make one supposedly homogeneous micro-batch return mixed widths.
+    width = target_width or bucket_width(max(8, int(round(target_height * aspect))))
+    content_width = min(width, max(8, int(round(target_height * aspect))))
     destination = np.asarray(
         [[0, 0], [content_width - 1, 0], [content_width - 1, target_height - 1], [0, target_height - 1]],
         dtype=np.float32,

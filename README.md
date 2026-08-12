@@ -167,17 +167,20 @@ Excel에 수백 개 시트를 넣으면 파일이 커질 수 있습니다. 통�
 
 ## OCR 학습 파이프라인
 
+데스크탑의 기본 학습 저장 루트는 `D:\harudam_model`입니다. 경로 옵션을 생략하면 합성 데이터와 shard는 `D:\harudam_model\training_dataset`, 모델별 checkpoint와 로그는 `D:\harudam_model\runs\<model>_<phase>`에 저장됩니다. 다른 위치가 필요할 때만 `--storage-root` 또는 개별 경로 옵션을 명시하세요.
+
 학습용 전체 데이터는 다음 명령으로 생성합니다. 기본값은 in-distribution 10,000장, 기존 5개 템플릿과 겹치지 않는 OOD layout 200장, 실제 촬영 대상 300 schedule/1,000장입니다. 노트북에서는 `--count 25 --ood-count 4 --skip-parquet` 정도로만 smoke test하고 전체 생성·학습은 CUDA 작업 환경에서 실행하세요.
 
 ```bash
 python generate_training_dataset.py \
   --count 10000 \
   --ood-count 200 \
-  --output-dir training_dataset \
   --render-chunk-size 25
 ```
 
 이 명령은 어떤 PNG나 crop도 만들기 전에 `splits/master_split.jsonl`을 만들고 SHA-256을 잠급니다. 모든 합성 원본·실제 촬영본·등록 결과·증강 recipe·recognition crop은 `schedule_id`로 이 split을 상속합니다. Train만 `cv_fold=0|1|2`이고 Validation/Test/OOD는 항상 `-1`입니다. loader는 자체 split을 만들지 않으며 unknown ID, split mismatch, Validation/Test/OOD 학습 유입, Test/OOD 기반 threshold·양자화·경로 선택을 예외로 중단합니다.
+
+학습용 Excel 청크에는 PNG와 동일한 근무표 시트, README, manifest만 넣습니다. 수만 행의 정답과 동일한 사전을 매 청크에 중복하지 않으며 canonical 정답은 `annotations/`의 CSV/JSONL과 `shards/`의 Parquet에 한 번만 저장합니다. 일반 생성과 인쇄용 Excel의 정답 시트 구조는 그대로 유지됩니다.
 
 대량 결과는 다음 구조입니다.
 
@@ -198,7 +201,8 @@ training_dataset/
     ├── validation-*.parquet
     ├── test-*.parquet
     ├── ood_layout-*.parquet
-    └── image_index.parquet
+    ├── image_index.parquet
+    └── recognition_index.parquet
 ```
 
 `objects`에는 제목, 날짜·요일, 그룹·이름, 근무 코드, 집계값이 모두 들어갑니다. `bbox_px`는 `cell_polygon`의 AABB이고, `text_polygon`은 같은 text object의 전체 glyph를 표현하는 하나의 convex/min-area quadrilateral입니다. 렌더 layout bounds를 우선 쓰고 2px 검증에 실패하면 glyph mask, 마지막으로 text/no-text 렌더 차분을 사용할 수 있습니다. 개별 획 contour는 정답으로 저장하지 않습니다.
@@ -214,6 +218,8 @@ python check_charset.py \
   --objects training_dataset/annotations/objects.jsonl \
   --output training_dataset/annotations/charset_coverage.recheck.json
 ```
+
+Parquet manifest는 `training_shards_v2`이며 split/CV, 표시·정규 코드, bbox와 두 polygon, glyph 검증 오차, visibility/ignore, 이미지 크기까지 포함한 checksum으로 CSV·JSONL·Parquet의 학습 의미가 같은지 확인합니다. 기존 v1 shard reader도 유지됩니다.
 
 고정 CTC 사전은 `data/korean_charset_v1.txt`입니다. `@range` 지시자는 고정된 한글 codepoint 순서를 뜻하며 dataset 문자에서 사전을 다시 만들지 않습니다. 문자 순서는 CTC class index이므로 기존 버전을 수정하지 말고 새 버전 파일과 모델을 함께 만들어야 합니다. transcription은 NFC `display_text`이며 `⁺`, `+`, `/`, `—`, `-`와 영문 대소문자를 보존합니다. `canonical_code` 변환은 OCR 이후 `shift_ocr.canonicalize.CodeCanonicalizer`에서 수행합니다.
 
@@ -237,18 +243,18 @@ EXIF 방향을 먼저 적용하고 원본과 사진의 long side를 2,400px로 �
 
 ```bash
 python train_models.py --model table \
-  --objects training_dataset/annotations/objects.jsonl \
-  --master-split training_dataset/splits/master_split.jsonl \
-  --image-root training_dataset \
-  --output-dir runs/table_pretrain
+  --image-size 1280 \
+  --batch-size 8 \
+  --effective-batch-size 32
 
 python train_models.py --model recognizer \
-  --phase real_finetune --resume runs/recognizer_pretrain/best.pt \
-  --objects training_dataset/annotations/objects.jsonl \
-  --master-split training_dataset/splits/master_split.jsonl \
-  --image-root training_dataset \
-  --output-dir runs/recognizer_real
+  --phase real_finetune \
+  --resume D:\harudam_model\runs\recognizer_pretrain\best.pt \
+  --epochs 10 --resume-lr-policy reset \
+  --storage-root D:\harudam_model
 ```
+
+10,000장 본 학습은 위와 같이 `--shard-dir`을 사용합니다. 이 경로는 image/recognition index만 메모리에 두고 annotation은 worker별로 필요한 Parquet row group만 읽습니다. `--objects`는 작은 디버그 데이터와 구형 shard가 없는 경우를 위한 호환 경로이며 `--shard-dir`과 동시에 지정할 수 없습니다.
 
 세 모델은 독립 학습됩니다.
 
@@ -256,7 +262,11 @@ python train_models.py --model recognizer \
 - recognizer: MobileNetV3-BiLSTM-CTC, cell exact accuracy 우선·동률 CER로 best 선택
 - table: MobileNetV3-FPN, `0.6 × cell polygon F1 + 0.4 × row accuracy`; dense head는 1/4 feature, 선택적 attention은 1/16 feature
 
-table decode는 기본 1,500 후보이며 1,200 미만 설정을 거부합니다. CUDA에서는 dry-run으로 batch를 낮추고 gradient accumulation으로 effective batch를 보완합니다. checkpoint는 best/last/주기 파일과 optimizer·scaler·RNG 상태를 저장해 완전 resume를 지원합니다. grouped 3-fold 비교는 `--cv-fold 0|1|2`로 Train 안에서만 실행합니다.
+table decode는 기본 2,048 후보이며 1,600 미만 설정을 거부합니다. center Gaussian과 corner offset으로 cell quad를 복원하고, quad IoU 0.5의 1:1 매칭으로 cell polygon F1을 계산합니다. row/column embedding은 decode와 관계 정확도 평가에 모두 사용합니다. CUDA에서는 실제 DataLoader 배치로 1~2 iteration을 실행해 peak VRAM을 측정하고, OOM이면 1,280px 해상도를 유지한 채 physical batch부터 낮춥니다. Windows의 `num_workers`는 자동으로 보수적인 값이 선택되며 `--num-workers`로 고정할 수 있습니다. 선택값과 변경 이유는 `runtime_settings.json`에 남습니다.
+
+checkpoint는 best/last/주기 파일과 optimizer·scheduler·AMP scaler·RNG 상태를 저장해 CUDA resume를 지원합니다. resume 시 `--epochs`는 추가 epoch 수이며, `--resume-lr-policy restore|reset`으로 checkpoint LR을 이어가거나 새 fine-tuning LR로 명시적으로 초기화합니다. phase 또는 Validation selection scope가 바뀌면 이전 best/history는 자동 초기화되어 새 scope의 첫 평가가 `best.pt`를 만듭니다. epoch별 train/validation loss, 실제 group learning rate, GPU VRAM(MB), 시간, 모델별 Validation 지표와 best 갱신 여부는 `training_history.csv`, `training_history.json`, `training_manifest.json`에 기록됩니다. grouped 3-fold 비교는 `--cv-fold 0|1|2`로 Train 안에서만 실행합니다.
+
+증강 이미지는 저장하지 않습니다. Dataset은 공유 absolute epoch를 사용해 같은 epoch·seed에서는 재현되면서 다음 epoch에는 다른 recipe/crop jitter를 만들며, Windows persistent worker와 checkpoint resume에서도 동일한 절대 epoch 규칙을 따릅니다.
 
 최종 지표는 `evaluate_models.py metrics`로 cell exact, CER, row exact, full-schedule exact, text detection Hmean, cell polygon F1을 기록합니다. Test와 OOD는 schedule 단위 2,000회 bootstrap 95% CI를 포함하고 별도 보고합니다. A/B/C/D 경로 선택은 `select-route`에서 real Validation만 허용하며 Test/OOD 입력은 거부합니다.
 

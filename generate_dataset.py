@@ -1548,7 +1548,10 @@ def build_renderer_payload(
     output_dir: Path,
     export_workbook: bool = True,
     workbook_name: str = 'synthetic_shift_dataset.xlsx',
+    workbook_profile: str = 'full',
 ) -> dict[str, Any]:
+    if workbook_profile not in {'full', 'training_chunk'}:
+        raise ValueError(f'Unsupported workbook profile: {workbook_profile}')
     sources = [
         {
             'source_id': 'historical_names',
@@ -1586,10 +1589,14 @@ def build_renderer_payload(
         'output_dir': str(output_dir),
         'export_workbook': export_workbook,
         'workbook_name': workbook_name,
+        'workbook_profile': workbook_profile,
         'shift_code_groups': SHIFT_CODE_GROUPS,
-        'name_entries': [asdict(entry) for entry in name_entries] if export_workbook else [],
-        'surname_entries': [asdict(entry) for entry in surname_entries] if export_workbook else [],
-        'surname_pool': [asdict(entry) for entry in surname_pool] if export_workbook else [],
+        # Training chunks intentionally omit the large, identical dictionaries.
+        # The canonical copies are exported once at the dataset root instead of
+        # being duplicated in every retained chunk workbook.
+        'name_entries': [asdict(entry) for entry in name_entries] if export_workbook and workbook_profile == 'full' else [],
+        'surname_entries': [asdict(entry) for entry in surname_entries] if export_workbook and workbook_profile == 'full' else [],
+        'surname_pool': [asdict(entry) for entry in surname_pool] if export_workbook and workbook_profile == 'full' else [],
         'schedules': [
             {**asdict(schedule), 'page_label': schedule.page_label}
             for schedule in schedules
@@ -1607,8 +1614,14 @@ def render_dataset_workbook(
     *,
     export_workbook: bool = True,
     workbook_name: str = 'synthetic_shift_dataset.xlsx',
+    workbook_profile: str = 'full',
 ) -> None:
-    """Render schedules to PNG and optionally export the combined workbook."""
+    """Render schedules to PNG and optionally export the combined workbook.
+
+    ``training_chunk`` retains the schedule sheets and a bounded manifest but
+    leaves canonical answers and dictionaries in the dataset-level external
+    files.  ``full`` preserves the legacy standalone workbook layout.
+    """
     node_executable, node_modules = resolve_artifact_tool_runtime()
     renderer_source = Path(__file__).resolve().with_name('render_workbook.mjs')
     if not renderer_source.exists():
@@ -1621,6 +1634,7 @@ def render_dataset_workbook(
         output_dir,
         export_workbook=export_workbook,
         workbook_name=workbook_name,
+        workbook_profile=workbook_profile,
     )
 
     with tempfile.TemporaryDirectory(prefix='shift-schedule-render-') as temp_name:

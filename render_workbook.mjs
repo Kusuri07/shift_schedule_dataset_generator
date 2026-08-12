@@ -662,7 +662,7 @@ function populateReferenceSheets(workbook, payload) {
 }
 
 
-function populateGroundTruthSheets(workbook, schedules) {
+function populateManifestSheet(workbook, schedules) {
   const manifestRows = schedules.map((schedule) => [
     schedule.schedule_id,
     schedule.template_id,
@@ -682,6 +682,34 @@ function populateGroundTruthSheets(workbook, schedules) {
     headerFill: "#1F4E78",
     columnWidths: [140, 150, 100, 100, 140, 80, 80, 90, 110, 140, 320, 110, 110],
   });
+}
+
+
+function populateTrainingChunkMetadata(workbook, schedules) {
+  const readme = workbook.worksheets.add("README");
+  readme.showGridLines = false;
+  readme.mergeCells("A1:H1");
+  readme.getRange("A1").values = [["합성 근무표 학습용 렌더링 청크"]];
+  applyStyle(readme.getRange("A1:H1"), { fill: "#1F4E78", bold: true, color: "#FFFFFF", size: 16 });
+  const notes = [
+    ["항목", "내용"],
+    ["용도", "원본 PNG 렌더링과 육안 확인을 위한 학습 데이터 청크"],
+    ["정답 원본", "../annotations/rows.*, cells.*, objects.* 파일이 canonical 정답입니다."],
+    ["Parquet", "../shards/ 아래 split별 shard와 image_index.parquet를 사용합니다."],
+    ["사전", "데이터셋 루트의 code_dictionary.csv, name_dictionary.csv, surname_dictionary.csv를 사용합니다."],
+    ["확장성", "대용량 정답 행과 사전은 이 문서에 중복하지 않아 25장 기본 청크도 안정적으로 저장됩니다."],
+  ];
+  readme.getRangeByIndexes(2, 0, notes.length, 2).values = notes;
+  applyStyle(readme.getRangeByIndexes(2, 0, 1, 2), { fill: "#D9EAF7", bold: true });
+  applyStyle(readme.getRangeByIndexes(3, 0, notes.length - 1, 2), { fill: "#FFFFFF", horizontalAlignment: "left", wrapText: true });
+  setColumnWidth(readme, 0, 150);
+  setColumnWidth(readme, 1, 660);
+  populateManifestSheet(workbook, schedules);
+}
+
+
+function populateGroundTruthSheets(workbook, schedules) {
+  populateManifestSheet(workbook, schedules);
 
   const rowRows = [];
   const cellRows = [];
@@ -741,6 +769,29 @@ function populateGroundTruthSheets(workbook, schedules) {
 }
 
 
+async function scanFormulaErrors(workbook, targets, summary) {
+  const results = [];
+  for (const target of targets) {
+    const scan = await workbook.inspect({
+      kind: "match",
+      sheetId: target.sheetName,
+      range: target.range,
+      searchTerm: "#REF!|#DIV/0!|#VALUE!|#NAME\\?|#N/A",
+      options: { useRegex: true, maxResults: 20 },
+      maxChars: 2000,
+      summary: `${summary}: ${target.sheetName}`,
+    });
+    results.push({ sheet_name: target.sheetName, range: target.range, result: scan.ndjson });
+  }
+  return JSON.stringify({
+    kind: "bounded_formula_error_scan",
+    inspected_sheet_count: targets.length,
+    per_sheet_max_results: 20,
+    results,
+  });
+}
+
+
 async function verifyWorkbook(xlsxPath, outputDir, sheetNames) {
   const input = await FileBlob.load(xlsxPath);
   const workbook = await SpreadsheetFile.importXlsx(input);
@@ -771,14 +822,9 @@ async function verifyWorkbook(xlsxPath, outputDir, sheetNames) {
     tableMaxCols: 4,
     maxChars: 3000,
   });
-  const errors = await workbook.inspect({
-    kind: "match",
-    searchTerm: "#REF!|#DIV/0!|#VALUE!|#NAME\\?|#N/A",
-    options: { useRegex: true, maxResults: 100 },
-    summary: "verification formula error scan",
-  });
+  const errors = await scanFormulaErrors(workbook, sheetSpecs, "verification formula error scan");
   console.log(keyRange.ndjson);
-  console.log(errors.ndjson);
+  console.log(errors);
 }
 
 
@@ -795,15 +841,21 @@ async function main() {
   if (!payloadPath || !resultPath) throw new Error("usage: node render_workbook.mjs <payload.json> <result.json>");
   const payload = JSON.parse(await fs.readFile(payloadPath, "utf8"));
   const exportWorkbook = payload.export_workbook !== false;
+  const workbookProfile = payload.workbook_profile ?? "full";
+  if (!new Set(["full", "training_chunk"]).has(workbookProfile)) {
+    throw new Error(`unsupported workbook profile: ${workbookProfile}`);
+  }
   await fs.mkdir(payload.output_dir, { recursive: true });
   await fs.mkdir(path.join(payload.output_dir, "images"), { recursive: true });
 
   const workbook = Workbook.create();
-  if (exportWorkbook) populateReferenceSheets(workbook, payload);
+  if (exportWorkbook && workbookProfile === "full") populateReferenceSheets(workbook, payload);
+  const formulaScanTargets = [];
 
   for (const schedule of payload.schedules) {
     const layout = scheduleLayout(schedule);
     schedule._layout = layout;
+    formulaScanTargets.push({ sheetName: schedule.sheet_name, range: layout.usedRange });
     const sheet = workbook.worksheets.add(schedule.sheet_name);
     configureScheduleSheet(sheet, schedule, layout);
     validateScheduleCellValues(sheet, schedule, layout);
@@ -849,13 +901,12 @@ async function main() {
     schedule.glyph_mask_path = path.posix.join(".glyph_masks", maskName);
   }
 
-  if (exportWorkbook) populateGroundTruthSheets(workbook, payload.schedules);
-  const formulaErrors = await workbook.inspect({
-    kind: "match",
-    searchTerm: "#REF!|#DIV/0!|#VALUE!|#NAME\\?|#N/A",
-    options: { useRegex: true, maxResults: 100 },
-    summary: "final formula error scan",
-  });
+  if (exportWorkbook && workbookProfile === "full") {
+    populateGroundTruthSheets(workbook, payload.schedules);
+  } else if (exportWorkbook) {
+    populateTrainingChunkMetadata(workbook, payload.schedules);
+  }
+  const formulaErrors = await scanFormulaErrors(workbook, formulaScanTargets, "final formula error scan");
   let xlsxPath = null;
   if (exportWorkbook) {
     const xlsx = await SpreadsheetFile.exportXlsx(workbook);
@@ -867,8 +918,9 @@ async function main() {
   const result = {
     render_scale: RENDER_SCALE,
     export_workbook: exportWorkbook,
+    workbook_profile: workbookProfile,
     xlsx_path: xlsxPath,
-    formula_error_scan: formulaErrors.ndjson,
+    formula_error_scan: formulaErrors,
     schedules: payload.schedules.map((schedule) => ({
       schedule_id: schedule.schedule_id,
       page_number: schedule.page_number,

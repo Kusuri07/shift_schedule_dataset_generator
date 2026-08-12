@@ -2,7 +2,168 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import math
+from typing import Any, NamedTuple
+
+
+# OOD schedules contain up to 40 people.  With day, name/group, summary and
+# header cells, a valid image can contain slightly more than 1,500 candidates.
+# Keep headroom above that observed maximum so the decoder cannot impose an
+# unavoidable false-negative ceiling.
+TABLE_CANDIDATE_TOP_K = 2048
+MIN_TABLE_CANDIDATE_TOP_K = 1600
+
+
+class TableCandidates(NamedTuple):
+    """Decoded table centers and relation-head grouping assignments.
+
+    The first two tuple positions remain ``scores`` and flattened ``indices``
+    for compatibility with the original decoder and the >1,000-cell stress
+    test.  Group IDs are arbitrary labels; equality between IDs defines the
+    predicted row/column partition.
+    """
+
+    scores: Any
+    indices: Any
+    points: Any
+    quads: Any
+    row_groups: Any
+    column_groups: Any
+    row_embeddings: Any
+    column_embeddings: Any
+
+
+def _cluster_relation_embeddings(vectors, distance_threshold: float):
+    """Cluster relation embeddings using the training loss margin.
+
+    Relation training pulls equal labels together and pushes different-label
+    centroids at least 1.0 apart.  A 0.5 inference threshold is therefore the
+    midpoint of that explicit margin, rather than a coordinate heuristic.
+    """
+
+    import torch
+
+    distance_threshold = float(distance_threshold)
+    if not math.isfinite(distance_threshold) or distance_threshold <= 0:
+        raise ValueError("relation distance threshold must be finite and positive")
+    if vectors.shape[0] == 0:
+        return torch.empty((0,), dtype=torch.long, device=vectors.device)
+    source_device = vectors.device
+    values = vectors.detach().float().cpu()
+    if not bool(torch.isfinite(values).all()):
+        raise ValueError("relation embeddings must contain only finite values")
+    # At the 1,500-candidate ceiling this is a bounded 2.25M-element matrix.
+    # Vectorized pairwise distances avoid 1,500 device synchronizations and
+    # make validation practical while connected components keep group labels
+    # independent of candidate score ordering.
+    adjacency = torch.cdist(values, values) <= distance_threshold
+    assignments = torch.full((len(values),), -1, dtype=torch.long)
+    group = 0
+    while bool((assignments < 0).any()):
+        seed = int((assignments < 0).nonzero()[0])
+        component = adjacency[seed].clone()
+        while True:
+            expanded = adjacency[component].any(dim=0)
+            if torch.equal(expanded, component):
+                break
+            component = expanded
+        component &= assignments < 0
+        assignments[component] = group
+        group += 1
+    return assignments.to(source_device)
+
+
+def decode_table_candidates(
+    outputs, *, threshold: float = 0.2, top_k: int = TABLE_CANDIDATE_TOP_K,
+    relation_distance_threshold: float = 0.5,
+    target_size: tuple[int, int] | None = None,
+):
+    """Decode NMS centers, corner-offset quads and relation groups.
+
+    ``top_k`` is a hard upper bound and is applied after 3x3 local-maximum
+    suppression.  When relation heads are present, grouping comes exclusively
+    from their learned embeddings.  Coordinate grouping is retained only as a
+    compatibility fallback for legacy heatmap-only exports.  ``target_size``
+    scales decoded quads into a target coordinate system *after* native-grid
+    NMS, avoiding duplicate peaks caused by upsampling a heatmap.
+    """
+
+    import torch
+    import torch.nn.functional as functional
+
+    if top_k < 1:
+        raise ValueError("table candidate top_k must be positive")
+    logits = outputs["cell_heatmap"]
+    if logits.ndim != 4 or logits.shape[1] != 1:
+        raise ValueError("cell_heatmap must have shape [batch, 1, height, width]")
+    source_height, source_width = logits.shape[-2:]
+    height, width = source_height, source_width
+    target_height, target_width = target_size or (height, width)
+    quad_scale_y = target_height / height
+    quad_scale_x = target_width / width
+    scores = logits.sigmoid()
+    local = functional.max_pool2d(scores, 3, stride=1, padding=1)
+    local_scores = torch.where(scores >= local, scores, torch.full_like(scores, -1.0))
+    flat_scores = local_scores.flatten(1)
+    count = min(int(top_k), flat_scores.shape[1])
+    values, indices = torch.topk(flat_scores, count, dim=1)
+
+    corner_map = outputs.get("corner_offsets")
+    if corner_map is None:
+        # Legacy heatmap-only exports retain center decoding, but their
+        # degenerate quads deliberately cannot pass polygon-IoU validation.
+        corner_map = logits.new_zeros((logits.shape[0], 8, height, width))
+    elif corner_map.ndim != 4 or corner_map.shape[1] != 8:
+        raise ValueError("corner_offsets must have shape [batch, 8, height, width]")
+    else:
+        corner_height, corner_width = corner_map.shape[-2:]
+        if (corner_height, corner_width) != (height, width):
+            corner_map = functional.interpolate(
+                corner_map, size=(height, width), mode="bilinear", align_corners=False,
+            )
+        corner_map = corner_map.clone()
+        corner_map[:, 0::2] *= width / corner_width
+        corner_map[:, 1::2] *= height / corner_height
+
+    relation_maps = {}
+    for name in ("row_embedding", "column_embedding"):
+        relation = outputs.get(name)
+        if relation is not None and relation.shape[-2:] != (height, width):
+            relation = functional.interpolate(relation, size=(height, width), mode="bilinear", align_corners=False)
+        relation_maps[name] = relation
+
+    decoded = []
+    for batch_index, (batch_values, batch_indices) in enumerate(zip(values, indices)):
+        keep = batch_values >= threshold
+        batch_values = batch_values[keep]
+        batch_indices = batch_indices[keep]
+        points = torch.stack((batch_indices // width, batch_indices % width), dim=1)
+        sampled_offsets = corner_map[
+            batch_index, :, points[:, 0], points[:, 1]
+        ].transpose(0, 1).reshape(-1, 4, 2)
+        centers_xy = torch.stack((points[:, 1], points[:, 0]), dim=1).to(sampled_offsets.dtype)
+        quads = sampled_offsets + centers_xy[:, None, :]
+        if (target_height, target_width) != (height, width):
+            quads = quads.clone()
+            quads[..., 0] *= quad_scale_x
+            quads[..., 1] *= quad_scale_y
+        embeddings = {}
+        groups = {}
+        for axis, coordinate_column in (("row", 0), ("column", 1)):
+            relation = relation_maps[f"{axis}_embedding"]
+            if relation is None:
+                vectors = points[:, coordinate_column:coordinate_column + 1].float()
+                grouping_threshold = 3.0
+            else:
+                vectors = relation[batch_index, :, points[:, 0], points[:, 1]].transpose(0, 1)
+                grouping_threshold = relation_distance_threshold
+            embeddings[axis] = vectors
+            groups[axis] = _cluster_relation_embeddings(vectors, grouping_threshold)
+        decoded.append(TableCandidates(
+            batch_values, batch_indices, points, quads, groups["row"], groups["column"],
+            embeddings["row"], embeddings["column"],
+        ))
+    return decoded
 
 
 def _torch():
@@ -122,9 +283,14 @@ class Recognizer:
 
 
 class TableStructureModel:
-    def __new__(cls, width: float = 0.75, attention: bool = False, top_k: int = 1500):
-        if top_k < 1200:
-            raise ValueError("table candidate top_k must be at least 1200")
+    def __new__(
+        cls, width: float = 0.75, attention: bool = False,
+        top_k: int = TABLE_CANDIDATE_TOP_K,
+    ):
+        if top_k < MIN_TABLE_CANDIDATE_TOP_K:
+            raise ValueError(
+                f"table candidate top_k must be at least {MIN_TABLE_CANDIDATE_TOP_K}"
+            )
         torch, nn, ConvBNAct, MobileBackbone, FPN = _components()
 
         class Network(nn.Module):
@@ -156,16 +322,24 @@ class TableStructureModel:
                     "column_embedding": self.column_embedding(p4),
                 }
 
-            def decode_candidates(self, outputs, threshold: float = 0.2):
-                scores = outputs["cell_heatmap"].sigmoid().flatten(1)
-                count = min(self.top_k, scores.shape[1])
-                values, indices = torch.topk(scores, count, dim=1)
-                return [(value[mask], index[mask]) for value, index, mask in zip(values, indices, values >= threshold)]
+            def decode_candidates(
+                self, outputs, threshold: float = 0.2,
+                relation_distance_threshold: float = 0.5,
+                target_size: tuple[int, int] | None = None,
+            ):
+                return decode_table_candidates(
+                    outputs, threshold=threshold, top_k=self.top_k,
+                    relation_distance_threshold=relation_distance_threshold,
+                    target_size=target_size,
+                )
 
         return Network()
 
 
-def build_model(kind: str, *, class_count: int = 0, attention: bool = False, top_k: int = 1500):
+def build_model(
+    kind: str, *, class_count: int = 0, attention: bool = False,
+    top_k: int = TABLE_CANDIDATE_TOP_K,
+):
     if kind == "dbnet":
         return DBNet()
     if kind == "recognizer":

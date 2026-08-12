@@ -20,6 +20,7 @@ from typing import Any, Iterable, Mapping
 import generate_dataset as generator
 from shift_ocr.charset import coverage_report, load_charset, write_coverage_report
 from shift_ocr.master_split import MasterSplit, create_master_split, write_master_split
+from shift_ocr.paths import DEFAULT_STORAGE_ROOT, dataset_root
 from shift_ocr.shards import build_parquet_shards, core_checksum, iter_jsonl
 
 
@@ -35,12 +36,14 @@ CELL_FIELDS = [
     "row_id", "row_index", "name", "surname", "surname_rank", "surname_population", "birth_year",
     "gender", "group", "day", "date", "canonical_code", "display_code", "display_text",
     "object_type", "excel_cell", "bbox_px", "cell_polygon", "text_polygon", "text_polygon_source",
+    "text_polygon_validation_max_error_px",
     "visibility", "ignore", "name_bbox_px", "name_cell_polygon", "image_path", "image_width", "image_height",
 ]
 OBJECT_FIELDS = [
     "schedule_id", "split", "cv_fold", "master_split_sha256", "template_id", "layout_family",
     "object_type", "display_text", "canonical_code", "row_id", "row_index", "day", "bbox_px",
     "cell_polygon", "text_polygon", "text_polygon_source", "visibility", "ignore", "image_path",
+    "text_polygon_validation_max_error_px",
     "image_width", "image_height",
 ]
 JSON_FIELDS = {"codes_canonical", "codes_display", "bbox_px", "cell_polygon", "text_polygon", "name_bbox_px", "name_cell_polygon"}
@@ -172,6 +175,7 @@ def render_plans(
         generator.render_dataset_workbook(
             schedules, names, surname_entries, surname_pool, output_dir,
             export_workbook=True, workbook_name=workbook_name,
+            workbook_profile="training_chunk",
         )
         for schedule in schedules:
             write_schedule_annotations(schedule, split, writers)
@@ -191,7 +195,10 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--count", type=int, default=10_000)
     parser.add_argument("--ood-count", type=int, default=200)
-    parser.add_argument("--output-dir", type=Path, default=Path("training_dataset"))
+    parser.add_argument(
+        "--output-dir", type=Path, default=dataset_root(DEFAULT_STORAGE_ROOT),
+        help=r"Dataset root (default: D:\harudam_model\training_dataset)",
+    )
     parser.add_argument("--seed", type=int, default=20260723)
     parser.add_argument("--render-chunk-size", type=int, default=25)
     parser.add_argument("--real-schedule-target", type=int)

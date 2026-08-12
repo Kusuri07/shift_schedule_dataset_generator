@@ -1,17 +1,18 @@
 {
+  "storage_root": "D:\\harudam_model",
   "dataset": {
     "synthetic_schedules": 10000,
     "ood_layout_schedules": 200,
     "real_schedules": 300,
     "real_photos": 1000,
-    "master_split": "training_dataset/splits/master_split.jsonl",
+    "master_split": "D:\\harudam_model\\training_dataset\\splits\\master_split.jsonl",
     "charset": "data/korean_charset_v1.txt",
     "on_the_fly_augmentation": true
   },
   "models": {
     "dbnet": {"architecture": "MobileNetV3-FPN", "best_metric": "text_polygon_hmean_iou_0_5"},
     "recognizer": {"architecture": "MobileNetV3-BiLSTM-CTC", "best_metric": "cell_exact_accuracy", "tie_breaker": "cer"},
-    "table": {"architecture": "MobileNetV3-FPN", "top_k": 1500, "attention_feature": "1/16", "dense_heads_feature": "1/4", "best_metric": "0.6*cell_polygon_f1+0.4*row_level_accuracy"}
+    "table": {"architecture": "MobileNetV3-FPN", "top_k": 2048, "attention_feature": "1/16", "dense_heads_feature": "1/4", "best_metric": "0.6*cell_polygon_f1+0.4*row_level_accuracy"}
   },
   "fine_tuning": {
     "synthetic_pretraining": true,
