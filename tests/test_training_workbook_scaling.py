@@ -73,7 +73,10 @@ class TrainingWorkbookScalingTests(unittest.TestCase):
             ensure_all_codes=False,
         )
         split_record = SimpleNamespace(layout_family="clean_grid", split="Train", cv_fold=0)
-        split = SimpleNamespace(require=mock.Mock(return_value=split_record))
+        split = SimpleNamespace(
+            require=mock.Mock(return_value=split_record),
+            metadata={"split_sha256": "test"},
+        )
         plan = {
             "schedule_id": "schedule_0001",
             "template_id": "clean_grid",
@@ -88,19 +91,59 @@ class TrainingWorkbookScalingTests(unittest.TestCase):
         ), mock.patch.object(
             training_generator.generator, "render_dataset_workbook"
         ) as render:
-            training_generator.render_plans(
-                [plan],
-                config,
-                [],
-                [],
-                [],
-                Path(temporary),
-                split,
-                object(),
-                25,
+            root = Path(temporary)
+
+            def fake_render(*_args, **kwargs):
+                workbook = root / kwargs["workbook_name"]
+                workbook.parent.mkdir(parents=True, exist_ok=True)
+                workbook.write_bytes(b"xlsx")
+                image = root / schedule.clean_image_path
+                image.parent.mkdir(parents=True, exist_ok=True)
+                image.write_bytes(b"png")
+                return {"node_peak_rss_mb": 10.0, "duration_seconds": 0.1}
+
+            render.side_effect = fake_render
+            first_state = training_generator.render_chunk(
+                family="schedule", plans=[plan], family_start=0, family_count=1,
+                config=config, names=[], surname_entries=[], surname_pool=[],
+                dataset_dir=root, cache_dir=root / "cache", log_dir=root / "logs",
+                master=split, retries=0,
+            )
+            second_state = training_generator.render_chunk(
+                family="schedule", plans=[plan], family_start=0, family_count=1,
+                config=config, names=[], surname_entries=[], surname_pool=[],
+                dataset_dir=root, cache_dir=root / "cache", log_dir=root / "logs",
+                master=split, retries=0,
             )
 
         self.assertEqual(render.call_args.kwargs["workbook_profile"], "training_chunk")
+        self.assertEqual(render.call_count, 1)
+        self.assertFalse(first_state["resumed_from_cache"])
+        self.assertTrue(second_state["resumed_from_cache"])
+
+    def test_master_split_is_reused_but_never_overwritten(self):
+        plans = training_generator.plan_family(
+            10, 7, generator.TEMPLATE_IDS, "schedule", ood=False,
+        )
+        config = {"count": 10, "ood_count": 0, "seed": 7}
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            first = training_generator.ensure_master_split(
+                plans, [], seed=7, config=config,
+                split_dir=root / "dataset" / "splits", cache_dir=root / "cache",
+            )
+            split_path = root / "dataset" / "splits" / "master_split.jsonl"
+            before = split_path.read_bytes()
+            with mock.patch.object(
+                training_generator, "write_master_split",
+                side_effect=AssertionError("must not overwrite"),
+            ):
+                second = training_generator.ensure_master_split(
+                    plans, [], seed=7, config=config,
+                    split_dir=root / "dataset" / "splits", cache_dir=root / "cache",
+                )
+            self.assertEqual(first.metadata["split_sha256"], second.metadata["split_sha256"])
+            self.assertEqual(split_path.read_bytes(), before)
 
     def test_polygon_validation_error_is_streamed_to_cells_and_objects(self):
         self.assertIn("text_polygon_validation_max_error_px", training_generator.CELL_FIELDS)

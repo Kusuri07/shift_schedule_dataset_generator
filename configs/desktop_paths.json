@@ -1,0 +1,11 @@
+{
+  "schema_version": "shift_ocr_storage_v1",
+  "paths": {
+    "datasets": "D:\\shift_ocr_training\\datasets",
+    "shards": "D:\\shift_ocr_training\\shards",
+    "checkpoints": "D:\\shift_ocr_training\\checkpoints",
+    "logs": "D:\\shift_ocr_training\\logs",
+    "exports": "D:\\shift_ocr_training\\exports",
+    "cache": "D:\\shift_ocr_training\\cache"
+  }
+}

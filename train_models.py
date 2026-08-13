@@ -23,7 +23,7 @@ from shift_ocr.datasets import (
 )
 from shift_ocr.master_split import MasterSplit
 from shift_ocr.models import build_model
-from shift_ocr.paths import DEFAULT_STORAGE_ROOT, dataset_root, training_run_dir
+from shift_ocr.paths import DEFAULT_PATH_CONFIG, load_storage_layout
 from shift_ocr.training import (
     TrainConfig, classify_optimizer_group_layout, fit, model_loss, move_to_device, parameter_groups,
     preview_resume_selection, seed_everything, select_device_and_precision,
@@ -68,9 +68,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", required=True, choices=["dbnet", "recognizer", "table"])
     parser.add_argument(
-        "--storage-root", type=Path, default=DEFAULT_STORAGE_ROOT,
-        help=r"Default dataset, run and checkpoint root (default: D:\harudam_model)",
+        "--path-config", type=Path, default=DEFAULT_PATH_CONFIG,
+        help="Storage layout JSON; every resolved path can still be overridden by CLI",
     )
+    parser.add_argument("--dataset-name", default="synthetic_10000")
     parser.add_argument("--objects", type=Path, action="append", help="Legacy/smoke JSONL path; repeat for synthetic and registered-real annotations")
     parser.add_argument(
         "--shard-dir", type=Path, action="append",
@@ -78,7 +79,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--master-split", type=Path)
     parser.add_argument("--image-root", type=Path)
-    parser.add_argument("--output-dir", type=Path)
+    parser.add_argument("--checkpoint-dir", type=Path)
+    parser.add_argument("--logs-dir", type=Path)
+    parser.add_argument("--output-dir", type=Path, help="Legacy alias for --checkpoint-dir")
     parser.add_argument("--charset", type=Path, default=Path("data/korean_charset_v1.txt"))
     parser.add_argument(
         "--epochs", type=positive_int, default=30,
@@ -90,6 +93,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--image-size", type=positive_int, default=1280, help="Dense-model long side; CUDA auto-tuning never lowers it")
     parser.add_argument("--num-workers", type=nonnegative_int, help="DataLoader workers; omitted selects a Windows-safe value")
     parser.add_argument("--dry-run-iterations", type=int, choices=[1, 2], default=2)
+    parser.add_argument(
+        "--vram-reserve-mb", type=positive_int, default=750,
+        help="Minimum decimal MB left outside the dry-run reserved peak",
+    )
+    parser.add_argument(
+        "--max-vram-fraction", type=float, default=0.90,
+        help="Maximum fraction of total VRAM allowed for the dry-run reserved peak",
+    )
     parser.add_argument("--seed", type=int, default=20260723)
     parser.add_argument("--resume", type=Path)
     parser.add_argument(
@@ -115,34 +126,41 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def resolve_storage_paths(args: argparse.Namespace) -> argparse.Namespace:
-    """Fill omitted training paths from the desktop storage root.
+    """Fill omitted training paths from the configurable storage layout.
 
     Explicit path arguments always win, preserving custom and smoke workflows.
     """
 
-    storage_root = args.storage_root.expanduser().resolve()
-    training_dataset = dataset_root(storage_root)
+    layout = load_storage_layout(args.path_config)
+    training_dataset = layout.dataset(args.dataset_name)
+    if args.checkpoint_dir is not None and args.output_dir is not None:
+        raise ValueError("use only one of --checkpoint-dir and legacy --output-dir")
     path_sources = {
-        "storage_root": "cli" if args.storage_root != DEFAULT_STORAGE_ROOT else "default",
+        "path_config": str(args.path_config.expanduser().resolve()),
         "shard_dir": "cli" if args.shard_dir else "default",
         "master_split": "cli" if args.master_split else "default",
         "image_root": "cli" if args.image_root else "default",
-        "output_dir": "cli" if args.output_dir else "default",
+        "checkpoint_dir": "cli" if (args.checkpoint_dir or args.output_dir) else "default",
+        "logs_dir": "cli" if args.logs_dir else "default",
     }
     if not args.objects and not args.shard_dir:
-        args.shard_dir = [training_dataset / "shards"]
+        args.shard_dir = [layout.shard_set(args.dataset_name)]
     if args.master_split is None:
         args.master_split = training_dataset / "splits" / "master_split.jsonl"
     if args.image_root is None:
         args.image_root = training_dataset
-    if args.output_dir is None:
-        args.output_dir = training_run_dir(
-            args.model, args.phase, storage_root=storage_root, cv_fold=args.cv_fold,
-        )
-    args.storage_root = storage_root
+    args.checkpoint_dir = args.checkpoint_dir or args.output_dir or layout.checkpoint_run(
+        args.model, args.phase, args.cv_fold,
+    )
+    if args.logs_dir is None:
+        args.logs_dir = layout.training_logs(args.model, args.phase, args.cv_fold)
     args.master_split = args.master_split.expanduser().resolve()
     args.image_root = args.image_root.expanduser().resolve()
-    args.output_dir = args.output_dir.expanduser().resolve()
+    args.checkpoint_dir = args.checkpoint_dir.expanduser().resolve()
+    args.logs_dir = args.logs_dir.expanduser().resolve()
+    # Internal compatibility name used by the existing training flow.
+    args.output_dir = args.checkpoint_dir
+    args._storage_layout = layout
     args._path_sources = path_sources
     return args
 
@@ -306,6 +324,8 @@ def probe_actual_batches(
     precision: str,
     autocast_dtype: Any,
     seed: int | None = None,
+    vram_reserve_mb: float = 750.0,
+    max_vram_fraction: float = 0.90,
 ) -> tuple[int, dict[str, Any]]:
     """Probe real DataLoader batches and lower only physical batch after OOM."""
 
@@ -354,20 +374,39 @@ def probe_actual_batches(
             torch.cuda.synchronize(device)
             peak_allocated = torch.cuda.max_memory_allocated(device) / 1_000_000
             peak_reserved = torch.cuda.max_memory_reserved(device) / 1_000_000
+            total_vram_mb = torch.cuda.get_device_properties(device).total_memory / 1_000_000
+            allowed_reserved_mb = min(
+                total_vram_mb - vram_reserve_mb,
+                total_vram_mb * max_vram_fraction,
+            )
+            has_headroom = peak_reserved <= allowed_reserved_mb
             attempts.append({
                 "physical_batch_size": candidate,
-                "status": "passed",
+                "status": "passed" if has_headroom else "insufficient_headroom",
                 "iterations_completed": len(losses),
                 "losses": losses,
                 "peak_allocated_mb": peak_allocated,
                 "peak_reserved_mb": peak_reserved,
+                "total_vram_mb": total_vram_mb,
+                "allowed_reserved_mb": allowed_reserved_mb,
+                "remaining_reserved_headroom_mb": total_vram_mb - peak_reserved,
             })
+            if not has_headroom and candidate > minimum_batch_size:
+                continue
+            if not has_headroom:
+                raise RuntimeError(
+                    f"{model_kind} batch {candidate} leaves insufficient VRAM headroom: "
+                    f"reserved={peak_reserved:.2f} MB, allowed={allowed_reserved_mb:.2f} MB"
+                )
             return candidate, {
                 "status": "passed",
                 "iterations_requested": iterations,
                 "attempts": attempts,
                 "peak_allocated_mb": peak_allocated,
                 "peak_reserved_mb": peak_reserved,
+                "total_vram_mb": total_vram_mb,
+                "allowed_reserved_mb": allowed_reserved_mb,
+                "remaining_reserved_headroom_mb": total_vram_mb - peak_reserved,
             }
         except RuntimeError as exc:
             is_oom = isinstance(exc, torch.cuda.OutOfMemoryError) or "out of memory" in str(exc).lower()
@@ -431,6 +470,8 @@ def main() -> None:
     args = resolve_storage_paths(build_parser().parse_args())
     if args.learning_rate <= 0:
         raise ValueError("learning_rate must be positive")
+    if not 0 < args.max_vram_fraction <= 1:
+        raise ValueError("max_vram_fraction must be in (0, 1]")
     if args.resume is None and args.resume_lr_policy != "restore":
         raise ValueError("--resume-lr-policy reset requires --resume")
     if bool(args.objects) == bool(args.shard_dir):
@@ -598,6 +639,8 @@ def main() -> None:
         precision=precision,
         autocast_dtype=autocast_dtype,
         seed=args.seed,
+        vram_reserve_mb=args.vram_reserve_mb,
+        max_vram_fraction=args.max_vram_fraction,
     )
 
     # The probe creates a model, advances loader generators and consumes CUDA
@@ -738,11 +781,16 @@ def main() -> None:
 
     runtime_settings: dict[str, Any] = {
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
-        "storage_root": str(args.storage_root),
+        "path_config": str(args.path_config.resolve()),
+        "storage_layout": {
+            name: str(getattr(args._storage_layout, name))
+            for name in ("datasets", "shards", "checkpoints", "logs", "exports", "cache")
+        },
         "resolved_paths": {
             "master_split": str(args.master_split),
             "image_root": str(args.image_root),
-            "output_dir": str(args.output_dir),
+            "checkpoint_dir": str(args.checkpoint_dir),
+            "logs_dir": str(args.logs_dir),
             "sources": args._path_sources,
         },
         "model": args.model,
@@ -795,17 +843,28 @@ def main() -> None:
         "num_workers_source": worker_source,
         "persistent_workers": num_workers > 0,
         "dry_run": dry_run,
+        "vram_headroom_policy": {
+            "minimum_reserve_mb": args.vram_reserve_mb,
+            "maximum_reserved_fraction": args.max_vram_fraction,
+        },
+        "optimizer": "AdamW",
+        "scheduler": "LambdaLR(epoch_decay=0.95, floor=1e-6)",
+        "checkpoint_every_epochs": config.checkpoint_every,
         "smoke": args.smoke,
         "smoke_train_batch_limit": 2 if args.smoke else None,
         "smoke_validation_batch_limit": 2 if args.smoke else None,
         "reasons": reasons,
     }
-    args.output_dir.mkdir(parents=True, exist_ok=True)
-    runtime_path = args.output_dir / "runtime_settings.json"
+    args.checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    args.logs_dir.mkdir(parents=True, exist_ok=True)
+    runtime_path = args.logs_dir / "runtime_settings.json"
     runtime_path.write_text(json.dumps(runtime_settings, ensure_ascii=False, indent=2), encoding="utf-8")
     print(json.dumps({"runtime_settings": runtime_settings}, ensure_ascii=False, indent=2), flush=True)
 
-    result = fit(model, loader, validation, config, args.output_dir, resume=args.resume)
+    result = fit(
+        model, loader, validation, config, args.checkpoint_dir,
+        resume=args.resume, log_dir=args.logs_dir,
+    )
     result["phase"] = args.phase
     result["cv_fold"] = args.cv_fold
     result["validation_scope"] = validation_scope
@@ -824,7 +883,7 @@ def main() -> None:
     runtime_path.write_text(
         json.dumps(runtime_settings, ensure_ascii=False, indent=2), encoding="utf-8",
     )
-    (args.output_dir / "training_manifest.json").write_text(
+    (args.logs_dir / "training_manifest.json").write_text(
         json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8",
     )
     print(json.dumps(result, ensure_ascii=False, indent=2))

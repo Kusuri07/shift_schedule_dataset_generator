@@ -34,6 +34,7 @@ import subprocess
 import sys
 import tempfile
 import textwrap
+import time
 from functools import lru_cache
 from dataclasses import dataclass, asdict, field
 from pathlib import Path
@@ -1615,7 +1616,7 @@ def render_dataset_workbook(
     export_workbook: bool = True,
     workbook_name: str = 'synthetic_shift_dataset.xlsx',
     workbook_profile: str = 'full',
-) -> None:
+) -> dict[str, Any]:
     """Render schedules to PNG and optionally export the combined workbook.
 
     ``training_chunk`` retains the schedule sheets and a bounded manifest but
@@ -1647,17 +1648,35 @@ def render_dataset_workbook(
         shutil.copy2(renderer_source, renderer_path)
         create_node_modules_link(node_modules_link, node_modules)
         try:
-            completed = subprocess.run(
-                [node_executable, str(renderer_path), str(payload_path), str(result_path)],
-                cwd=temp_dir,
-                capture_output=True,
-                text=True,
-                encoding='utf-8',
-                errors='replace',
-                check=False,
-            )
-            if completed.returncode != 0:
-                detail = completed.stderr.strip() or completed.stdout.strip()
+            stdout_path = temp_dir / 'renderer.stdout.txt'
+            stderr_path = temp_dir / 'renderer.stderr.txt'
+            peak_rss_bytes = 0
+            started = time.perf_counter()
+            with stdout_path.open('wb') as stdout_stream, stderr_path.open('wb') as stderr_stream:
+                process = subprocess.Popen(
+                    [node_executable, str(renderer_path), str(payload_path), str(result_path)],
+                    cwd=temp_dir, stdout=stdout_stream, stderr=stderr_stream,
+                )
+                try:
+                    import psutil
+
+                    monitored = psutil.Process(process.pid)
+                    while process.poll() is None:
+                        try:
+                            tree_rss_bytes = monitored.memory_info().rss
+                            for child in monitored.children(recursive=True):
+                                tree_rss_bytes += child.memory_info().rss
+                            peak_rss_bytes = max(peak_rss_bytes, tree_rss_bytes)
+                        except (psutil.NoSuchProcess, psutil.AccessDenied):
+                            pass
+                        time.sleep(0.1)
+                finally:
+                    return_code = process.wait()
+            duration_seconds = time.perf_counter() - started
+            stdout = stdout_path.read_text(encoding='utf-8', errors='replace')
+            stderr = stderr_path.read_text(encoding='utf-8', errors='replace')
+            if return_code != 0:
+                detail = stderr.strip() or stdout.strip()
                 raise RuntimeError(f'Excel/PNG renderer failed: {detail}')
             result = json.loads(result_path.read_text(encoding='utf-8'))
         finally:
@@ -1712,6 +1731,12 @@ def render_dataset_workbook(
             row_layout = by_row_id[row.row_id]
             row.excel_row = row_layout['excel_row']
             row.name_cell = row_layout['name_cell']
+    return {
+        'duration_seconds': duration_seconds,
+        'node_peak_rss_mb': peak_rss_bytes / 1_000_000,
+        'schedule_count': len(schedules),
+        'workbook_name': workbook_name if export_workbook else None,
+    }
 
 
 def generate_dataset(

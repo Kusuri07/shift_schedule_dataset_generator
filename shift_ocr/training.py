@@ -231,6 +231,15 @@ def classify_optimizer_group_layout(current_groups, checkpoint_groups) -> str:
 def apply_unfreezing(model, epoch: int, config: TrainConfig) -> str:
     if not hasattr(model, "backbone"):
         return "all"
+    if config.training_phase == "synthetic_pretrain":
+        # Synthetic pre-training learns the entire representation from
+        # scratch.  The gradual freeze schedule belongs exclusively to real
+        # photo fine-tuning and must never leak into this phase.
+        for parameter in model.backbone.parameters():
+            parameter.requires_grad = True
+        return "synthetic_all_trainable"
+    if config.training_phase != "real_finetune":
+        raise ValueError(f"unsupported training phase: {config.training_phase}")
     for parameter in model.backbone.parameters():
         parameter.requires_grad = epoch >= config.full_unfreeze_epoch
     if epoch >= config.partial_unfreeze_epoch and hasattr(model.backbone, "stage16"):
@@ -634,6 +643,7 @@ def _step_sample_average(scaler, optimizer, accumulated_samples: int) -> None:
 def fit(
     model, train_loader, validation_function: Callable[[Any], Mapping[str, float]],
     config: TrainConfig, checkpoint_dir: Path, *, resume: Path | None = None,
+    log_dir: Path | None = None,
 ) -> dict[str, Any]:
     import torch
 
@@ -644,6 +654,7 @@ def fit(
     scaler = torch.amp.GradScaler("cuda", enabled=device.type == "cuda" and precision == "fp16")
     scheduler = _make_scheduler(optimizer, config)
     manager = CheckpointManager(checkpoint_dir, config.model_kind)
+    training_log_dir = log_dir or checkpoint_dir
     start_epoch = 0
     best_metrics = None
     history = []
@@ -820,7 +831,7 @@ def fit(
             "selection_state": selection_state,
             "history": history,
         }
-        _write_training_logs(checkpoint_dir, manifest)
+        _write_training_logs(training_log_dir, manifest)
     manifest = {
         "model_kind": config.model_kind,
         "best_metric_spec": BEST_METRICS[config.model_kind],
@@ -845,5 +856,5 @@ def fit(
         "selection_state": selection_state,
         "history": history,
     }
-    _write_training_logs(checkpoint_dir, manifest)
+    _write_training_logs(training_log_dir, manifest)
     return manifest

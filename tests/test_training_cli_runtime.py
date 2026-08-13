@@ -45,16 +45,16 @@ class LazyBatchLimitTests(unittest.TestCase):
 
 
 class RuntimeSelectionTests(unittest.TestCase):
-    def test_default_training_paths_use_d_drive_storage_root(self):
+    def test_default_training_paths_use_separated_config_layout(self):
         args = resolve_storage_paths(build_parser().parse_args(["--model", "dbnet"]))
-        self.assertEqual(args.storage_root, Path(r"D:\harudam_model"))
-        self.assertEqual(args.shard_dir, [Path(r"D:\harudam_model\training_dataset\shards")])
+        self.assertEqual(args.shard_dir, [Path(r"D:\shift_ocr_training\shards\synthetic_10000")])
         self.assertEqual(
             args.master_split,
-            Path(r"D:\harudam_model\training_dataset\splits\master_split.jsonl"),
+            Path(r"D:\shift_ocr_training\datasets\synthetic_10000\splits\master_split.jsonl"),
         )
-        self.assertEqual(args.image_root, Path(r"D:\harudam_model\training_dataset"))
-        self.assertEqual(args.output_dir, Path(r"D:\harudam_model\runs\dbnet_pretrain"))
+        self.assertEqual(args.image_root, Path(r"D:\shift_ocr_training\datasets\synthetic_10000"))
+        self.assertEqual(args.checkpoint_dir, Path(r"D:\shift_ocr_training\checkpoints\dbnet_pretrain"))
+        self.assertEqual(args.logs_dir, Path(r"D:\shift_ocr_training\logs\dbnet_pretrain"))
 
     def test_explicit_training_paths_override_storage_defaults(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -67,7 +67,7 @@ class RuntimeSelectionTests(unittest.TestCase):
                 "--output-dir", str(root / "run"),
             ]))
         self.assertIsNone(args.shard_dir)
-        self.assertEqual(args.output_dir, (root / "run").resolve())
+        self.assertEqual(args.checkpoint_dir, (root / "run").resolve())
 
     def test_windows_worker_default_and_loader_options(self):
         self.assertEqual(resolve_num_workers(None, logical_cpu_count=20, platform_name="Windows"), (4, "auto_windows_safe"))

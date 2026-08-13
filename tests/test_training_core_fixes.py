@@ -103,7 +103,13 @@ class CheckpointAndFitTests(unittest.TestCase):
         config = TrainConfig(
             model_kind="dbnet", partial_unfreeze_epoch=0, full_unfreeze_epoch=0,
         )
-        self.assertEqual(apply_unfreezing(model, 0, config), "fully_unfrozen")
+        self.assertEqual(apply_unfreezing(model, 0, config), "synthetic_all_trainable")
+        fine_tune = TrainConfig(
+            model_kind="dbnet", training_phase="real_finetune",
+            partial_unfreeze_epoch=1, full_unfreeze_epoch=2,
+        )
+        self.assertEqual(apply_unfreezing(model, 0, fine_tune), "backbone_frozen")
+        self.assertEqual(apply_unfreezing(model, 0, config), "synthetic_all_trainable")
         optimizer = torch.optim.AdamW(groups)
         backbone_parameter = next(model.backbone.parameters())
         before = backbone_parameter.detach().clone()

@@ -167,7 +167,18 @@ Excel에 수백 개 시트를 넣으면 파일이 커질 수 있습니다. 통�
 
 ## OCR 학습 파이프라인
 
-데스크탑의 기본 학습 저장 루트는 `D:\harudam_model`입니다. 경로 옵션을 생략하면 합성 데이터와 shard는 `D:\harudam_model\training_dataset`, 모델별 checkpoint와 로그는 `D:\harudam_model\runs\<model>_<phase>`에 저장됩니다. 다른 위치가 필요할 때만 `--storage-root` 또는 개별 경로 옵션을 명시하세요.
+데스크탑 경로는 코드에 하드코딩하지 않고 `configs/desktop_paths.json`에서 관리합니다. 기본 설정은 다음처럼 데이터, shard, checkpoint, 로그, export, 재시도 cache를 분리합니다.
+
+```text
+D:\shift_ocr_training\datasets
+D:\shift_ocr_training\shards
+D:\shift_ocr_training\checkpoints
+D:\shift_ocr_training\logs
+D:\shift_ocr_training\exports
+D:\shift_ocr_training\cache
+```
+
+다른 PC에서는 config 파일을 복사해 `--path-config`로 선택하거나 `--dataset-dir`, `--shard-dir`, `--cache-dir`, `--log-dir`, `--checkpoint-dir`로 개별 경로를 덮어쓸 수 있습니다.
 
 학습용 전체 데이터는 다음 명령으로 생성합니다. 기본값은 in-distribution 10,000장, 기존 5개 템플릿과 겹치지 않는 OOD layout 200장, 실제 촬영 대상 300 schedule/1,000장입니다. 노트북에서는 `--count 25 --ood-count 4 --skip-parquet` 정도로만 smoke test하고 전체 생성·학습은 CUDA 작업 환경에서 실행하세요.
 
@@ -175,8 +186,11 @@ Excel에 수백 개 시트를 넣으면 파일이 커질 수 있습니다. 통�
 python generate_training_dataset.py \
   --count 10000 \
   --ood-count 200 \
+  --dataset-name synthetic_10000 \
   --render-chunk-size 25
 ```
+
+`--render-chunk-size 25`는 production 검증을 통과한 기본값입니다. 각 청크의 PNG, Excel, annotation, 해시와 실행 상태는 분리된 cache에 기록됩니다. artifact-tool 청크가 실패하면 기본 2회까지 해당 청크만 재시도하며, 같은 명령을 다시 실행해도 완료된 청크와 immutable master split은 다시 만들거나 덮어쓰지 않습니다. 200장 production pilot도 `--count 200 --ood-count 0 --dataset-name production_pilot_200`만 다르고 같은 코드 경로를 사용합니다.
 
 이 명령은 어떤 PNG나 crop도 만들기 전에 `splits/master_split.jsonl`을 만들고 SHA-256을 잠급니다. 모든 합성 원본·실제 촬영본·등록 결과·증강 recipe·recognition crop은 `schedule_id`로 이 split을 상속합니다. Train만 `cv_fold=0|1|2`이고 Validation/Test/OOD는 항상 `-1`입니다. loader는 자체 split을 만들지 않으며 unknown ID, split mismatch, Validation/Test/OOD 학습 유입, Test/OOD 기반 threshold·양자화·경로 선택을 예외로 중단합니다.
 
@@ -249,9 +263,9 @@ python train_models.py --model table \
 
 python train_models.py --model recognizer \
   --phase real_finetune \
-  --resume D:\harudam_model\runs\recognizer_pretrain\best.pt \
+  --resume D:\shift_ocr_training\checkpoints\recognizer_pretrain\best.pt \
   --epochs 10 --resume-lr-policy reset \
-  --storage-root D:\harudam_model
+  --path-config configs/desktop_paths.json
 ```
 
 10,000장 본 학습은 위와 같이 `--shard-dir`을 사용합니다. 이 경로는 image/recognition index만 메모리에 두고 annotation은 worker별로 필요한 Parquet row group만 읽습니다. `--objects`는 작은 디버그 데이터와 구형 shard가 없는 경우를 위한 호환 경로이며 `--shard-dir`과 동시에 지정할 수 없습니다.

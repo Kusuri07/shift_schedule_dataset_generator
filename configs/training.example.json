@@ -1,11 +1,12 @@
 {
-  "storage_root": "D:\\harudam_model",
+  "path_config": "configs/desktop_paths.json",
+  "dataset_name": "synthetic_10000",
   "dataset": {
     "synthetic_schedules": 10000,
     "ood_layout_schedules": 200,
     "real_schedules": 300,
     "real_photos": 1000,
-    "master_split": "D:\\harudam_model\\training_dataset\\splits\\master_split.jsonl",
+    "master_split": "resolved from path_config + dataset_name",
     "charset": "data/korean_charset_v1.txt",
     "on_the_fly_augmentation": true
   },
